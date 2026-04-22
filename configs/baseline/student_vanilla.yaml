@@ -1,0 +1,32 @@
+# Phase C step 1: Vanilla DistilRoBERTa-base baseline.
+#
+# Establishes the "small model, no distillation" Pareto point.
+# Same training recipe as the teacher; only the backbone differs.
+#
+# Pairs with Phase C step 2 (distilled version) for the headline comparison:
+#   "distillation recovered X% of the teacher gap"
+#
+# DistilRoBERTa chosen over DistilBERT because:
+#   - Same tokenizer as RoBERTa-large teacher (required for distillation)
+#   - Slightly stronger on NER tasks in published benchmarks
+#
+# Expected wall-clock: ~1.5 hours for 3 seeds.
+# Expected entity F1: ~0.80-0.82.
+
+model_name: distilroberta-base
+seeds: [88, 5768, 78516]
+learning_rate: 1.0e-5
+batch_size: 8
+num_epochs: 30
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.0
+lr_scheduler_type: linear
+label_smoothing_factor: 0.0
+
+wandb_project: finer-ord
+wandb_tags: [student, phase-c, distilroberta, vanilla]
+output_dir: ./results

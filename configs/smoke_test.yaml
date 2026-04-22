@@ -1,0 +1,23 @@
+# Fast smoke test to verify the full training + eval pipeline works.
+# Uses the smallest model and 1 epoch to catch bugs before long runs.
+#
+# Expected wall-clock: ~3-5 minutes total.
+# Expected entity F1: ~0.70 (irrelevant; we just want it to complete).
+
+model_name: distilbert-base-cased
+seeds: [88]
+learning_rate: 1.0e-5
+batch_size: 16
+num_epochs: 1
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.0
+lr_scheduler_type: linear
+label_smoothing_factor: 0.0
+
+wandb_project: finer-ord
+wandb_tags: [smoke-test]
+output_dir: ./results

@@ -1,0 +1,27 @@
+# Core ML stack
+torch==2.3.1
+transformers==4.44.2
+datasets==2.21.0
+tokenizers==0.19.1
+accelerate==0.33.0
+
+# Metrics
+seqeval==1.2.2
+scikit-learn==1.5.1
+
+# CRF layer (Phase B)
+pytorch-crf==0.7.2
+
+# Data handling
+numpy==1.26.4
+pandas==2.2.2
+
+# W&B
+wandb==0.17.7
+
+# Other
+pyyaml==6.0.2
+
+# Optional: for notebook experimentation
+# jupyter==1.0.0
+# matplotlib==3.9.2
