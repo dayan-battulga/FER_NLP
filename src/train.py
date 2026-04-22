@@ -273,32 +273,85 @@ def write_json_file(path: Path, payload: Any) -> None:
 
 
 def append_csv_row(csv_path: Path, header: list[str], row: dict[str, Any]) -> None:
-    """Append one row to a CSV file, validating or creating the header first."""
+    """Append one row to a CSV file, self-healing if the existing file is
+    malformed. Schemas that truly don't match are backed up to a .bak file
+    rather than silently overwritten."""
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not csv_path.exists() or csv_path.stat().st_size == 0:
+    def write_fresh(rows_to_preserve: list[dict[str, Any]]) -> None:
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=header)
             writer.writeheader()
-    else:
-        # Validate the header before appending so we never silently corrupt a
-        # long-running results table with mismatched columns.
-        with csv_path.open("r", newline="", encoding="utf-8") as handle:
-            reader = csv.reader(handle)
-            existing_header = next(reader, [])
+            for preserved in rows_to_preserve:
+                writer.writerow({key: preserved.get(key, "") for key in header})
 
-        normalized_existing = [column.strip() for column in existing_header]
-        normalized_expected = [column.strip() for column in header]
-        if normalized_existing != normalized_expected:
-            raise ValueError(
-                f"CSV header mismatch for {csv_path}. "
-                f"Expected {header}, found {existing_header}."
-            )
+    def append_row() -> None:
+        # Make sure the file ends with a newline so the new row can't ever be
+        # glued onto the previous line (this is what caused the original bug).
+        with csv_path.open("rb") as handle:
+            try:
+                handle.seek(-1, 2)
+                ends_with_newline = handle.read(1) in (b"\n", b"\r")
+            except OSError:
+                ends_with_newline = True
+        with csv_path.open("a", newline="", encoding="utf-8") as handle:
+            if not ends_with_newline:
+                handle.write("\n")
+            writer = csv.DictWriter(handle, fieldnames=header)
+            writer.writerow({key: row.get(key, "") for key in header})
 
-    with csv_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=header)
-        writer.writerow({key: row.get(key, "") for key in header})
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        write_fresh([])
+        append_row()
+        return
+
+    with csv_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+
+    if not rows:
+        write_fresh([])
+        append_row()
+        return
+
+    existing_header = [column.strip() for column in rows[0]]
+    normalized_expected = [column.strip() for column in header]
+
+    if existing_header == normalized_expected:
+        append_row()
+        return
+
+    n = len(normalized_expected)
+
+    # Case: header got glued to the first data row (no newline between them),
+    # producing a single oversized "header" like [..., 'notesfoo', 'distilbert', ...].
+    # The last name in the expected header appears as a prefix on element n-1 of
+    # the existing header, and elements n.. are the first data row's values.
+    if (
+        len(existing_header) >= 2 * n
+        and existing_header[: n - 1] == normalized_expected[: n - 1]
+        and existing_header[n - 1].startswith(normalized_expected[n - 1])
+    ):
+        first_value = existing_header[n - 1][len(normalized_expected[n - 1]) :]
+        recovered_row_values = [first_value] + existing_header[n : 2 * n - 1]
+        recovered_first = dict(zip(normalized_expected, recovered_row_values))
+        remaining_rows = [dict(zip(normalized_expected, r)) for r in rows[1:] if r]
+        write_fresh([recovered_first, *remaining_rows])
+        append_row()
+        return
+
+    # Case: schemas are genuinely different. Back up the old file instead of
+    # destroying it, then start fresh with the current schema.
+    backup_path = csv_path.with_suffix(
+        csv_path.suffix + f".bak.{int(time.time())}"
+    )
+    csv_path.rename(backup_path)
+    print(
+        f"[append_csv_row] Incompatible existing schema in {csv_path.name}; "
+        f"backed up to {backup_path.name} and starting fresh."
+    )
+    write_fresh([])
+    append_row()
 
 
 def summarize_seed_values(values: list[float]) -> dict[str, float]:
