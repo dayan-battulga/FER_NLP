@@ -1,0 +1,2 @@
+run_id,model,seed,warmup_ratio,lr_scheduler,label_smoothing,test_token_f1,test_entity_f1,test_per_f1,test_loc_f1,test_org_f1,train_time_min
+smoke_test_seed88,distilbert-base-cased,88,0.0,linear,0.0,0.9513508560729624,0.4114832535885168,0.2251908396946565,0.45884413309982486,0.4614295824486907,0.5388759215129539

@@ -151,7 +151,13 @@ def get_dataset_and_tokenizer(model_name, max_length=256, run_checks=False):
     Returns (tokenized_dataset, tokenizer, grouped_dataset). The grouped
     dataset is kept around for error analysis on raw tokens/labels.
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True)
+
+    # RoBERTa-family tokenizers need add_prefix_space for split tokens
+    if "roberta" in model_name.lower():
+        tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
     grouped = load_finer_ord()
 
     if run_checks:
@@ -164,7 +170,6 @@ def get_dataset_and_tokenizer(model_name, max_length=256, run_checks=False):
 
 if __name__ == "__main__":
     # Smoke test: python -m src.data
-    tokenizer = AutoTokenizer.from_pretrained("roberta-base", add_prefix_space=True)
-    grouped = load_finer_ord()
+    _, tokenizer, grouped = get_dataset_and_tokenizer("roberta-base", run_checks=False)
     sanity_check_labels(grouped)
     verify_alignment(grouped, tokenizer)

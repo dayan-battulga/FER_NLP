@@ -1,1 +1,1 @@
-experiment_id, model, seed, config_hash, train_f1_val, test_entity_f1, test_per_f1, test_loc_f1, test_org_f1, params, train_time_min, notes
+experiment_id, model, seed, config_hash, train_f1_val, test_entity_f1, test_per_f1, test_loc_f1, test_org_f1, params, train_time_min, notessmoke_test_seed88,distilbert-base-cased,88,0af6d2c500e6,0.40710584752035534,0.4114832535885168,0.2251908396946565,0.45884413309982486,0.4614295824486907,65196295,0.5388759215129539,smoke_test | tags=smoke-test
