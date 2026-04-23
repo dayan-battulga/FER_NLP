@@ -24,4 +24,4 @@ use_distillation: false
 
 wandb_project: finer-ord
 wandb_tags: [phase-d, ablation, efficient-training, 5-epoch, deberta-v3-large]
-output_dir: results/deberta_efficient
+output_dir: ./results

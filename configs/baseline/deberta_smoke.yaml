@@ -24,4 +24,4 @@ use_distillation: false
 
 wandb_project: finer-ord
 wandb_tags: [phase-d, smoke, deberta-v3-large]
-output_dir: ./results
+output_dir: results/deberta_smoke_seed88/
