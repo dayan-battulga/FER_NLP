@@ -1,0 +1,27 @@
+# Phase D variant: DeBERTa-v3-large efficient 5-epoch run with LLRD.
+#
+# Mirrors the efficient-training setup but swaps in DeBERTa and enables
+# label-all-subwords alignment plus layer-wise LR decay.
+
+model_name: microsoft/deberta-v3-large
+seeds: [88, 5768, 78516]
+learning_rate: 5.0e-5
+head_lr: 5.0e-5
+llrd_decay: 0.9
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+label_all_subwords: true
+use_crf: false
+use_distillation: false
+
+wandb_project: finer-ord
+wandb_tags: [phase-d, ablation, efficient-training, 5-epoch, deberta-v3-large]
+output_dir: results/deberta_efficient

@@ -95,6 +95,9 @@ class TrainConfig:
     warmup_ratio: float
     lr_scheduler_type: str
     label_smoothing_factor: float
+    label_all_subwords: bool = False
+    llrd_decay: float | None = None
+    head_lr: float | None = None
     wandb_project: str | None = None
     wandb_tags: list[str] | None = None
     output_dir: str = "./results"
@@ -121,6 +124,9 @@ class TrainConfig:
         self.fp16 = bool(self.fp16)
         self.warmup_ratio = float(self.warmup_ratio)
         self.label_smoothing_factor = float(self.label_smoothing_factor)
+        self.label_all_subwords = bool(self.label_all_subwords)
+        self.llrd_decay = float(self.llrd_decay) if self.llrd_decay is not None else None
+        self.head_lr = float(self.head_lr) if self.head_lr is not None else None
         self.save_total_limit = int(self.save_total_limit)
         self.use_crf = bool(self.use_crf)
         self.use_distillation = bool(self.use_distillation)
@@ -147,6 +153,10 @@ class TrainConfig:
             raise ValueError("`warmup_ratio` must be in [0, 1].")
         if self.label_smoothing_factor < 0.0:
             raise ValueError("`label_smoothing_factor` must be >= 0.")
+        if self.llrd_decay is not None and not 0.0 < self.llrd_decay <= 1.0:
+            raise ValueError("`llrd_decay` must be in (0, 1].")
+        if self.head_lr is not None and self.head_lr <= 0.0:
+            raise ValueError("`head_lr` must be > 0.")
         if self.save_total_limit <= 0:
             raise ValueError("`save_total_limit` must be > 0.")
 
@@ -365,6 +375,186 @@ def summarize_seed_values(values: list[float]) -> dict[str, float]:
 
 
 # -----------------------------------------------------------------------------
+# Optimizer helpers
+# -----------------------------------------------------------------------------
+
+
+def _is_no_decay_parameter(name: str) -> bool:
+    """Match standard HF AdamW no-decay parameters."""
+    return (
+        name.endswith(".bias")
+        or ".LayerNorm.weight" in name
+        or ".LayerNorm.bias" in name
+        or ".layer_norm.weight" in name
+        or ".layer_norm.bias" in name
+    )
+
+
+def _compute_llrd_lr_map(
+    model: torch.nn.Module,
+    head_lr: float,
+    decay: float,
+) -> dict[str, float]:
+    """Compute effective LRs for task head, encoder layers, and embeddings."""
+    if not hasattr(model, "base_model"):
+        raise ValueError("LLRD requires a model exposing `base_model`.")
+    if not hasattr(model.base_model, "encoder") or not hasattr(model.base_model.encoder, "layer"):
+        raise ValueError(
+            "LLRD requires `model.base_model.encoder.layer`; model structure is incompatible."
+        )
+
+    num_layers = len(model.base_model.encoder.layer)
+    lr_by_bucket: dict[str, float] = {"task_head": head_lr}
+    for layer_idx in range(num_layers - 1, -1, -1):
+        exponent = num_layers - layer_idx
+        lr_by_bucket[f"encoder.layer.{layer_idx}"] = head_lr * (decay**exponent)
+    lr_by_bucket["embeddings"] = head_lr * (decay**num_layers)
+    return lr_by_bucket
+
+
+def _assign_llrd_bucket(
+    name: str,
+    base_prefix_with_dot: str,
+    embeddings_prefix: str,
+    layer_prefix: str,
+    valid_bucket_names: set[str],
+) -> str:
+    """Map one trainable parameter name to its LLRD bucket."""
+    if not name.startswith(base_prefix_with_dot):
+        return "task_head"
+    if name.startswith(embeddings_prefix):
+        return "embeddings"
+    if name.startswith(layer_prefix):
+        layer_suffix = name[len(layer_prefix) :]
+        layer_index_str = layer_suffix.split(".", 1)[0]
+        if not layer_index_str.isdigit():
+            raise ValueError(f"Could not parse encoder layer index from parameter: {name}")
+        bucket_name = f"encoder.layer.{int(layer_index_str)}"
+        if bucket_name not in valid_bucket_names:
+            raise ValueError(
+                f"Encountered unexpected encoder layer bucket `{bucket_name}` from `{name}`."
+            )
+        return bucket_name
+
+    # DeBERTa-v3 has encoder-level relative position embeddings
+    # (`deberta.encoder.rel_embeddings.*`) that sit outside encoder.layer.*.
+    # We intentionally map them to the `embeddings` bucket (the smallest LR),
+    # not to the bottom encoder layer. This is DeBERTa-specific; RoBERTa does
+    # not expose a comparable `rel_embeddings` base-model parameter.
+    return "embeddings"
+
+
+def build_llrd_param_groups(
+    model: torch.nn.Module,
+    head_lr: float,
+    decay: float,
+    weight_decay: float,
+) -> list[dict[str, Any]]:
+    """Build AdamW parameter groups for layer-wise learning-rate decay."""
+    if not hasattr(model, "base_model_prefix"):
+        raise ValueError("LLRD requires a model exposing `base_model_prefix`.")
+
+    lr_by_bucket = _compute_llrd_lr_map(model, head_lr=head_lr, decay=decay)
+    base_prefix = model.base_model_prefix
+    base_prefix_with_dot = f"{base_prefix}."
+    embeddings_prefix = f"{base_prefix_with_dot}embeddings."
+    layer_prefix = f"{base_prefix_with_dot}encoder.layer."
+
+    bucket_params: dict[str, dict[str, list[torch.nn.Parameter]]] = {
+        bucket_name: {"decay": [], "no_decay": []}
+        for bucket_name in lr_by_bucket
+    }
+    assigned_param_ids: set[int] = set()
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        bucket_name = _assign_llrd_bucket(
+            name=name,
+            base_prefix_with_dot=base_prefix_with_dot,
+            embeddings_prefix=embeddings_prefix,
+            layer_prefix=layer_prefix,
+            valid_bucket_names=set(bucket_params),
+        )
+
+        param_id = id(param)
+        if param_id in assigned_param_ids:
+            raise ValueError(f"Parameter assigned multiple times during LLRD grouping: {name}")
+        assigned_param_ids.add(param_id)
+
+        decay_key = "no_decay" if _is_no_decay_parameter(name) else "decay"
+        bucket_params[bucket_name][decay_key].append(param)
+
+    expected_param_ids = {
+        id(parameter)
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    }
+    if assigned_param_ids != expected_param_ids:
+        raise ValueError(
+            "LLRD grouping did not cover all trainable parameters exactly once. "
+            f"assigned={len(assigned_param_ids)} expected={len(expected_param_ids)}"
+        )
+
+    param_groups: list[dict[str, Any]] = []
+    for bucket_name, lr in lr_by_bucket.items():
+        if bucket_params[bucket_name]["decay"]:
+            param_groups.append(
+                {
+                    "params": bucket_params[bucket_name]["decay"],
+                    "lr": lr,
+                    "weight_decay": weight_decay,
+                }
+            )
+        if bucket_params[bucket_name]["no_decay"]:
+            param_groups.append(
+                {
+                    "params": bucket_params[bucket_name]["no_decay"],
+                    "lr": lr,
+                    "weight_decay": 0.0,
+                }
+            )
+    return param_groups
+
+
+def log_llrd_learning_rates(model: torch.nn.Module, head_lr: float, decay: float) -> None:
+    """Print a one-time table of effective LRs used by LLRD."""
+    lr_by_bucket = _compute_llrd_lr_map(model, head_lr=head_lr, decay=decay)
+    base_prefix = model.base_model_prefix
+    base_prefix_with_dot = f"{base_prefix}."
+    embeddings_prefix = f"{base_prefix_with_dot}embeddings."
+    layer_prefix = f"{base_prefix_with_dot}encoder.layer."
+
+    print("=" * 60)
+    print("LLRD learning rates")
+    print("=" * 60)
+    for bucket_name, lr in lr_by_bucket.items():
+        print(f"  {bucket_name:20s} {lr:.10g}")
+
+    rel_embedding_rows = []
+    valid_bucket_names = set(lr_by_bucket)
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or "rel_embeddings" not in name:
+            continue
+        bucket_name = _assign_llrd_bucket(
+            name=name,
+            base_prefix_with_dot=base_prefix_with_dot,
+            embeddings_prefix=embeddings_prefix,
+            layer_prefix=layer_prefix,
+            valid_bucket_names=valid_bucket_names,
+        )
+        rel_embedding_rows.append((name, bucket_name, lr_by_bucket[bucket_name]))
+
+    if rel_embedding_rows:
+        print("  rel_embeddings assignments")
+        for name, bucket_name, lr in rel_embedding_rows:
+            print(f"  {name:35s} {bucket_name:12s} lr={lr:.10g}")
+        if len({bucket_name for _, bucket_name, _ in rel_embedding_rows}) != 1:
+            raise ValueError("`rel_embeddings` parameters were assigned to multiple LLRD buckets.")
+
+
+# -----------------------------------------------------------------------------
 # Trainer construction
 # -----------------------------------------------------------------------------
 
@@ -433,6 +623,19 @@ def create_trainer(
         save_safetensors=True,
     )
 
+    trainer_kwargs: dict[str, Any] = {}
+    if config.llrd_decay is not None:
+        effective_head_lr = config.head_lr if config.head_lr is not None else config.learning_rate
+        log_llrd_learning_rates(model, head_lr=effective_head_lr, decay=config.llrd_decay)
+        llrd_param_groups = build_llrd_param_groups(
+            model=model,
+            head_lr=effective_head_lr,
+            decay=config.llrd_decay,
+            weight_decay=config.weight_decay,
+        )
+        optimizer = torch.optim.AdamW(llrd_param_groups)
+        trainer_kwargs["optimizers"] = (optimizer, None)
+
     return Trainer(
         model=model,
         args=training_args,
@@ -447,6 +650,7 @@ def create_trainer(
                 early_stopping_threshold=config.early_stopping_threshold,
             )
         ],
+        **trainer_kwargs,
     )
 
 
@@ -608,16 +812,20 @@ def run_single_seed(
 
         if torch.cuda.is_available():
             device_name = "cuda"
+            gpu_type = torch.cuda.get_device_name(0)
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             device_name = "mps"
+            gpu_type = None
         else:
             device_name = "cpu"
+            gpu_type = None
 
         summary_payload = {
             "run_id": run_id,
             "config": resolved_config,
             "runtime": {
                 "device": device_name,
+                "gpu_type": gpu_type,
                 "fp16_requested": config.fp16,
                 "fp16_enabled": bool(config.fp16 and device_name == "cuda"),
             },
@@ -715,6 +923,11 @@ def run_training(
 
     # Keep future experiment modes explicit instead of silently ignoring them.
     if config.use_crf:
+        if config.llrd_decay is not None:
+            raise ValueError(
+                "`llrd_decay` is only supported in the vanilla training path. "
+                "Set `use_crf: false` or remove `llrd_decay`."
+            )
         from src.crf_model import run_crf_training
 
         run_crf_training(
@@ -740,6 +953,7 @@ def run_training(
         config.model_name,
         max_length=config.max_seq_length,
         run_checks=run_checks,
+        label_all_subwords=config.label_all_subwords,
     )
 
     seed_results = []
