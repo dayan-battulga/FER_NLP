@@ -1,0 +1,35 @@
+# Phase B step 2: RoBERTa-large + CRF head.
+#
+# Targets the ORG/LOC boundary errors identified in the error analysis:
+#   - I-LOC tokens being mislabeled as B-LOC mid-span
+#   - I-LOC tokens being dropped as O
+#   - Multi-token ORG entities cut short
+#
+# CRF adds a linear-chain transition matrix and Viterbi decoding at
+# inference, forcing BIO-valid label sequences.
+#
+# Expected wall-clock: ~20% slower per step than vanilla = ~5-7 hours for 3 seeds.
+# Expected entity F1: +1-3 points over vanilla RoBERTa-large.
+# If F1 exceeds vanilla teacher, this becomes THE teacher for distillation.
+
+model_name: roberta-large
+seeds: [88]
+learning_rate: 1.0e-5
+batch_size: 8
+num_epochs: 30
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.0
+lr_scheduler_type: linear
+label_smoothing_factor: 0.0
+
+# CRF-specific
+use_crf: true
+crf_learning_rate: 1.0e-4  # CRF transitions typically trained at higher LR than backbone
+
+wandb_project: finer-ord
+wandb_tags: [teacher, phase-b, roberta-large, crf]
+output_dir: ./results

@@ -9,7 +9,7 @@ accelerate==0.33.0
 seqeval==1.2.2
 scikit-learn==1.5.1
 
-# CRF layer (Phase B)
+# CRF layer
 pytorch-crf==0.7.2
 
 # Data handling
