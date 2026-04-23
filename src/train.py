@@ -715,10 +715,15 @@ def run_training(
 
     # Keep future experiment modes explicit instead of silently ignoring them.
     if config.use_crf:
-        raise NotImplementedError(
-            "This config enables `use_crf=true`, but CRF training is reserved for "
-            "`src/crf_model.py` and is not implemented in `src.train.py` yet."
+        from src.crf_model import run_crf_training
+
+        run_crf_training(
+            config=config,
+            config_path=config_path,
+            run_checks=run_checks,
+            disable_wandb=disable_wandb,
         )
+        return
     if config.use_distillation:
         raise NotImplementedError(
             "This config enables `use_distillation=true`, but distillation is "
