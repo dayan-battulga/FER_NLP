@@ -8,11 +8,11 @@ CRF run produces the same artifacts (summary.json, predictions.json,
 checkpoint-best/, master CSV rows) as the vanilla run.
 
 Critical rules honored here (see CLAUDE.md and docs/PROJECT_CONTEXT.md):
-  - Run the CRF only on valid first-subword label positions. Special tokens,
-    padding, and continuation subwords are removed from the CRF sequence
-    entirely via `crf_mask`.
-  - Enforce BIO legality as hard constraints: I-* cannot start a sequence,
-    and I-X can only follow B-X or I-X.
+  - Use `attention_mask` as the CRF mask so the first timestep is always
+    valid. Replace -100 in labels with 0 before the CRF forward; rely on
+    the mask to ignore special / continuation subwords at loss time.
+    Filter -100 positions out of the final metric computation using the
+    original label_ids.
   - Parameter groups: backbone LR (config.learning_rate, e.g. 1e-5) and
     classifier + CRF transitions LR (config.crf_learning_rate, e.g. 1e-4).
   - CRF transitions can NaN in fp16; run emissions in float32 even when
@@ -61,78 +61,6 @@ from src.train import (
 )
 
 
-CONSTRAINT_SCORE = -1e4
-
-
-def split_bio_label(label: str) -> tuple[str, str | None]:
-    """Return the BIO prefix and entity type for one label string."""
-
-    if label == "O":
-        return "O", None
-
-    prefix, entity_type = label.split("-", maxsplit=1)
-    return prefix, entity_type
-
-
-def build_bio_constraint_masks() -> tuple[torch.Tensor, torch.Tensor]:
-    """Build legality masks for BIO starts and pairwise transitions."""
-
-    legal_start_mask = torch.zeros(NUM_LABELS, dtype=torch.bool)
-    legal_transition_mask = torch.zeros(NUM_LABELS, NUM_LABELS, dtype=torch.bool)
-
-    for current_id, current_label in ID2LABEL.items():
-        current_prefix, current_entity_type = split_bio_label(current_label)
-        legal_start_mask[current_id] = current_prefix != "I"
-
-        for previous_id, previous_label in ID2LABEL.items():
-            previous_prefix, previous_entity_type = split_bio_label(previous_label)
-
-            if current_prefix == "I":
-                is_legal = (
-                    previous_prefix in {"B", "I"}
-                    and previous_entity_type == current_entity_type
-                )
-            else:
-                is_legal = True
-
-            legal_transition_mask[previous_id, current_id] = is_legal
-
-    return legal_start_mask, legal_transition_mask
-
-
-class CrfDataCollator(DataCollatorForTokenClassification):
-    """Pad CRF masks alongside the usual token-classification features."""
-
-    def torch_call(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        import torch
-
-        if "crf_mask" not in features[0]:
-            raise ValueError("CRF batches must include `crf_mask` for every example.")
-
-        crf_masks = [feature["crf_mask"] for feature in features]
-        base_features = [
-            {key: value for key, value in feature.items() if key != "crf_mask"}
-            for feature in features
-        ]
-        batch = super().torch_call(base_features)
-
-        sequence_length = batch["input_ids"].shape[1]
-        padding_side = self.tokenizer.padding_side
-        if padding_side == "right":
-            padded_masks = [
-                list(mask) + [0] * (sequence_length - len(mask))
-                for mask in crf_masks
-            ]
-        else:
-            padded_masks = [
-                [0] * (sequence_length - len(mask)) + list(mask)
-                for mask in crf_masks
-            ]
-
-        batch["crf_mask"] = torch.tensor(padded_masks, dtype=torch.bool)
-        return batch
-
-
 # -----------------------------------------------------------------------------
 # Model
 # -----------------------------------------------------------------------------
@@ -162,11 +90,6 @@ class RobertaCrfForTokenClassification(nn.Module):
         self.dropout = nn.Dropout(dropout_prob)
         self.classifier = nn.Linear(self.backbone_config.hidden_size, NUM_LABELS)
         self.crf = CRF(NUM_LABELS, batch_first=True)
-        legal_start_mask, legal_transition_mask = build_bio_constraint_masks()
-        self.register_buffer("legal_start_mask", legal_start_mask)
-        self.register_buffer("legal_transition_mask", legal_transition_mask)
-        self._register_constraint_hooks()
-        self._apply_hard_bio_constraints()
 
     def _emissions(
         self,
@@ -185,159 +108,54 @@ class RobertaCrfForTokenClassification(nn.Module):
         hidden = self.dropout(outputs.last_hidden_state)
         return self.classifier(hidden).float()
 
-    def _register_constraint_hooks(self) -> None:
-        """Keep illegal CRF transitions frozen at the hard-constraint score."""
-
-        self.crf.start_transitions.register_hook(
-            lambda grad: grad.masked_fill(~self.legal_start_mask, 0.0)
-        )
-        self.crf.transitions.register_hook(
-            lambda grad: grad.masked_fill(~self.legal_transition_mask, 0.0)
-        )
-
-    def _apply_hard_bio_constraints(self) -> None:
-        """Clamp illegal BIO starts and transitions to a large negative score."""
-
-        with torch.no_grad():
-            self.crf.start_transitions.masked_fill_(
-                ~self.legal_start_mask,
-                CONSTRAINT_SCORE,
-            )
-            self.crf.transitions.masked_fill_(
-                ~self.legal_transition_mask,
-                CONSTRAINT_SCORE,
-            )
-
-    def _pack_valid_tokens(
-        self,
-        emissions: torch.Tensor,
-        attention_mask: torch.Tensor,
-        crf_mask: torch.Tensor,
-        labels: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, list[torch.Tensor]]:
-        """Pack valid CRF positions into a dense batch with contiguous masks."""
-
-        valid_mask = crf_mask.bool() & attention_mask.bool()
-        lengths = valid_mask.sum(dim=1)
-        if torch.any(lengths == 0):
-            bad_rows = (lengths == 0).nonzero(as_tuple=False).view(-1).tolist()
-            raise ValueError(
-                "Every CRF sequence must contain at least one valid token position. "
-                f"Empty rows: {bad_rows}"
-            )
-
-        batch_size, _, num_labels = emissions.shape
-        max_length = int(lengths.max().item())
-        packed_emissions = emissions.new_zeros((batch_size, max_length, num_labels))
-        packed_mask = torch.zeros(
-            (batch_size, max_length),
-            dtype=torch.bool,
-            device=emissions.device,
-        )
-        packed_labels = None
-        if labels is not None:
-            packed_labels = torch.zeros(
-                (batch_size, max_length),
-                dtype=torch.long,
-                device=labels.device,
-            )
-
-        valid_positions: list[torch.Tensor] = []
-        for row_idx in range(batch_size):
-            row_positions = valid_mask[row_idx].nonzero(as_tuple=False).view(-1)
-            row_length = int(row_positions.numel())
-
-            valid_positions.append(row_positions)
-            packed_emissions[row_idx, :row_length] = emissions[row_idx].index_select(
-                0, row_positions
-            )
-            packed_mask[row_idx, :row_length] = True
-
-            if packed_labels is not None:
-                row_labels = labels[row_idx].index_select(0, row_positions)
-                if torch.any(row_labels == -100):
-                    raise ValueError(
-                        "Packed CRF labels must contain only valid BIO tag ids."
-                    )
-                packed_labels[row_idx, :row_length] = row_labels
-
-        return packed_emissions, packed_labels, packed_mask, valid_positions
-
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        crf_mask: torch.Tensor,
         labels: torch.Tensor | None = None,
         **_unused: Any,
     ) -> dict[str, torch.Tensor | None]:
-        """Return the CRF loss computed only over valid first-subword tokens."""
+        """Return a dict with `loss`, `emissions`, `mask`.
 
+        The CRF mask is `attention_mask` so position 0 (the <s>/[CLS] token)
+        is always included; that satisfies pytorch-crf's requirement that
+        the first timestep of the mask be True. Special-token and
+        continuation labels (-100) are replaced with 0 for the CRF forward,
+        and later filtered out at metric time using the original label_ids.
+        """
+
+        mask = attention_mask.bool()
         emissions = self._emissions(input_ids, attention_mask)
 
         loss: torch.Tensor | None = None
         if labels is not None:
-            (
-                packed_emissions,
-                packed_labels,
-                packed_mask,
-                _,
-            ) = self._pack_valid_tokens(
-                emissions=emissions,
-                attention_mask=attention_mask,
-                crf_mask=crf_mask,
-                labels=labels,
-            )
-            self._apply_hard_bio_constraints()
+            labels_for_crf = labels.clone()
+            labels_for_crf[labels_for_crf == -100] = 0
             # Disable autocast only around the CRF, which is log-space and
             # prone to NaN in fp16. The backbone/classifier above already
             # benefit from the outer fp16 autocast context on CUDA.
             with autocast(enabled=False):
                 loss = -self.crf(
-                    packed_emissions,
-                    packed_labels,
-                    mask=packed_mask,
+                    emissions,
+                    labels_for_crf,
+                    mask=mask,
                     reduction="mean",
                 )
 
-        return {"loss": loss}
+        return {"loss": loss, "emissions": emissions, "mask": mask}
 
     @torch.no_grad()
     def decode(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        crf_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Viterbi-decode and scatter tags back to the original token grid."""
+    ) -> list[list[int]]:
+        """Viterbi-decode the most likely tag sequence per example."""
 
+        mask = attention_mask.bool()
         emissions = self._emissions(input_ids, attention_mask)
-        packed_emissions, _, packed_mask, valid_positions = self._pack_valid_tokens(
-            emissions=emissions,
-            attention_mask=attention_mask,
-            crf_mask=crf_mask,
-        )
-        self._apply_hard_bio_constraints()
         with autocast(enabled=False):
-            decoded_batches = self.crf.decode(packed_emissions, mask=packed_mask)
-
-        predictions = torch.full(
-            input_ids.shape,
-            fill_value=-100,
-            dtype=torch.long,
-            device=input_ids.device,
-        )
-        for row_idx, decoded_sequence in enumerate(decoded_batches):
-            row_positions = valid_positions[row_idx]
-            if len(decoded_sequence) != int(row_positions.numel()):
-                raise ValueError("Decoded CRF sequence length does not match packed mask.")
-            predictions[row_idx, row_positions] = torch.tensor(
-                decoded_sequence,
-                dtype=torch.long,
-                device=input_ids.device,
-            )
-
-        return predictions
+            return self.crf.decode(emissions, mask=mask)
 
 
 # -----------------------------------------------------------------------------
@@ -350,9 +168,8 @@ class CrfTrainer(Trainer):
 
     Two parameter groups: the backbone at `config.learning_rate` and the
     classifier + CRF head at `crf_learning_rate`. Predictions are decoded
-    tag IDs, not logits, so `prediction_step` returns CRF-decoded tags
-    aligned back to the original batch sequence length with -100 in
-    non-scored positions.
+    tag IDs, not logits, so `prediction_step` runs Viterbi and returns the
+    decoded tags padded to the batch's seq length with -100.
     """
 
     def __init__(self, *args: Any, crf_learning_rate: float, **kwargs: Any) -> None:
@@ -399,7 +216,6 @@ class CrfTrainer(Trainer):
         outputs = model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
-            crf_mask=inputs["crf_mask"],
             labels=inputs.get("labels"),
         )
         loss = outputs["loss"]
@@ -422,18 +238,32 @@ class CrfTrainer(Trainer):
             outputs = model(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
-                crf_mask=inputs["crf_mask"],
                 labels=labels,
             )
             loss = outputs["loss"] if has_labels else None
-            predictions = model.decode(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                crf_mask=inputs["crf_mask"],
-            )
+            decoded_batches = model.crf.decode(outputs["emissions"], mask=outputs["mask"])
 
         if prediction_loss_only:
             return (loss, None, None)
+
+        # Pad each decoded sequence back to the batch seq length with -100 so
+        # HF Trainer's nested_concat can stack variable-length batches.
+        reference = labels if labels is not None else inputs["input_ids"]
+        batch_size, seq_len = reference.shape
+        predictions = torch.full(
+            (batch_size, seq_len),
+            fill_value=-100,
+            dtype=torch.long,
+            device=reference.device,
+        )
+        for row, decoded_sequence in enumerate(decoded_batches):
+            length = len(decoded_sequence)
+            if length > 0:
+                predictions[row, :length] = torch.tensor(
+                    decoded_sequence,
+                    dtype=torch.long,
+                    device=reference.device,
+                )
 
         return (loss, predictions, labels)
 
@@ -552,7 +382,7 @@ def create_crf_trainer(
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         tokenizer=tokenizer,
-        data_collator=CrfDataCollator(tokenizer=tokenizer),
+        data_collator=DataCollatorForTokenClassification(tokenizer=tokenizer),
         compute_metrics=compute_metrics_crf,
         callbacks=[
             EarlyStoppingCallback(

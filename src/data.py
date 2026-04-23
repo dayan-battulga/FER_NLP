@@ -6,7 +6,6 @@ Handles:
   - Converting PER_B/PER_I suffix labels to B-PER/I-PER prefix (seqeval format)
   - Grouping token-flat data into sentence-level sequences
   - First-subword-only label alignment for tokenization
-  - Emitting a CRF-only valid-token mask that excludes specials and continuations
   - Sanity checks for label mapping
 """
 
@@ -69,27 +68,19 @@ def tokenize_dataset(dataset, tokenizer, max_length=256):
         )
 
         aligned_labels = []
-        crf_masks = []
         for i, word_labels in enumerate(examples["gold_label"]):
             word_ids = tokenized.word_ids(batch_index=i)
             previous_word_idx = None
             label_ids = []
-            crf_mask = []
             for word_idx in word_ids:
                 if word_idx is None or word_idx == previous_word_idx:
                     label_ids.append(-100)
-                    crf_mask.append(0)
                 else:
                     label_ids.append(word_labels[word_idx])
-                    crf_mask.append(1)
                 previous_word_idx = word_idx
-            if sum(crf_mask) != sum(label_id != -100 for label_id in label_ids):
-                raise ValueError("CRF mask must match the positions with real labels.")
             aligned_labels.append(label_ids)
-            crf_masks.append(crf_mask)
 
         tokenized["labels"] = aligned_labels
-        tokenized["crf_mask"] = crf_masks
         return tokenized
 
     return dataset.map(tokenize_and_align, batched=True)
