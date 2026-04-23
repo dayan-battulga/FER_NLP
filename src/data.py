@@ -5,7 +5,7 @@ Handles:
   - Loading gtfintechlab/finer-ord from HuggingFace
   - Converting PER_B/PER_I suffix labels to B-PER/I-PER prefix (seqeval format)
   - Grouping token-flat data into sentence-level sequences
-  - First-subword-only label alignment for tokenization
+  - First-subword-only or all-subword label alignment for tokenization
   - Sanity checks for label mapping
 """
 
@@ -28,6 +28,40 @@ ID2LABEL = {
 }
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
 NUM_LABELS = len(ID2LABEL)
+
+
+def get_continuation_label_id(label_id):
+    """Map a word-level BIO label to the label used on continuation subwords."""
+    label_name = ID2LABEL[label_id]
+    if label_name == "O" or label_name.startswith("I-"):
+        return label_id
+    if label_name.startswith("B-"):
+        return LABEL2ID[f"I-{label_name[2:]}"]
+    raise ValueError(f"Unsupported label for continuation subwords: {label_name}")
+
+
+def align_labels_to_subwords(word_ids, word_labels, label_all_subwords=False):
+    """Align one word-level label sequence to tokenizer subwords."""
+    previous_word_idx = None
+    label_ids = []
+
+    for word_idx in word_ids:
+        if word_idx is None:
+            label_ids.append(-100)
+        elif word_idx != previous_word_idx:
+            label_ids.append(word_labels[word_idx])
+        elif label_all_subwords:
+            label_ids.append(get_continuation_label_id(word_labels[word_idx]))
+        else:
+            label_ids.append(-100)
+        previous_word_idx = word_idx
+
+    return label_ids
+
+
+def format_label_ids(label_ids):
+    """Convert aligned integer labels into printable strings."""
+    return ["-100" if label_id == -100 else ID2LABEL[label_id] for label_id in label_ids]
 
 
 def load_finer_ord():
@@ -55,8 +89,8 @@ def load_finer_ord():
     return DatasetDict(grouped_splits)
 
 
-def tokenize_dataset(dataset, tokenizer, max_length=256):
-    """Apply tokenization and first-subword-only label alignment across all splits."""
+def tokenize_dataset(dataset, tokenizer, max_length=256, label_all_subwords=False):
+    """Apply tokenization and label alignment across all dataset splits."""
 
     def tokenize_and_align(examples):
         clean_tokens = [[str(tok) for tok in seq] for seq in examples["gold_token"]]
@@ -70,15 +104,13 @@ def tokenize_dataset(dataset, tokenizer, max_length=256):
         aligned_labels = []
         for i, word_labels in enumerate(examples["gold_label"]):
             word_ids = tokenized.word_ids(batch_index=i)
-            previous_word_idx = None
-            label_ids = []
-            for word_idx in word_ids:
-                if word_idx is None or word_idx == previous_word_idx:
-                    label_ids.append(-100)
-                else:
-                    label_ids.append(word_labels[word_idx])
-                previous_word_idx = word_idx
-            aligned_labels.append(label_ids)
+            aligned_labels.append(
+                align_labels_to_subwords(
+                    word_ids,
+                    word_labels,
+                    label_all_subwords=label_all_subwords,
+                )
+            )
 
         tokenized["labels"] = aligned_labels
         return tokenized
@@ -115,7 +147,13 @@ def sanity_check_labels(grouped_dataset, max_samples=3):
         print(f"  {split_name}: {n_sentences} sentences, {n_tokens} tokens")
 
 
-def verify_alignment(grouped_dataset, tokenizer, max_length=256, sample_idx=0):
+def verify_alignment(
+    grouped_dataset,
+    tokenizer,
+    max_length=256,
+    sample_idx=0,
+    label_all_subwords=False,
+):
     """Print subword-level alignment for one example to eyeball tokenizer behavior."""
     print("=" * 60)
     print(f"Subword alignment for train[{sample_idx}]")
@@ -131,20 +169,85 @@ def verify_alignment(grouped_dataset, tokenizer, max_length=256, sample_idx=0):
     )
     word_ids = tokenized.word_ids(batch_index=0)
     subword_tokens = tokenizer.convert_ids_to_tokens(tokenized["input_ids"][0])
+    aligned_labels = align_labels_to_subwords(
+        word_ids,
+        row["gold_label"],
+        label_all_subwords=label_all_subwords,
+    )
 
     previous_word_idx = None
-    for subword, word_idx in zip(subword_tokens, word_ids):
-        if word_idx is None:
+    for subword, word_idx, label_id in zip(subword_tokens, word_ids, aligned_labels):
+        if label_id == -100 and word_idx is None:
             label = "-100 (special)"
-        elif word_idx == previous_word_idx:
+        elif label_id == -100 and word_idx == previous_word_idx:
             label = "-100 (continuation)"
         else:
-            label = ID2LABEL[row["gold_label"][word_idx]]
+            label = ID2LABEL[label_id]
         print(f"  {subword:20s} {label}")
         previous_word_idx = word_idx
 
 
-def get_dataset_and_tokenizer(model_name, max_length=256, run_checks=False):
+def run_label_alignment_demo(tokenizer, max_length=256):
+    """Print a small ORG example under both alignment modes."""
+    print("\n" + "=" * 60)
+    print("Label alignment demo: Apple Inc.")
+    print("=" * 60)
+
+    example_tokens = ["Apple", "Inc."]
+    example_labels = [LABEL2ID["B-ORG"], LABEL2ID["I-ORG"]]
+
+    tokenized = tokenizer(
+        [example_tokens],
+        truncation=True,
+        is_split_into_words=True,
+        max_length=max_length,
+    )
+    word_ids = tokenized.word_ids(batch_index=0)
+    subword_tokens = tokenizer.convert_ids_to_tokens(tokenized["input_ids"][0])
+
+    first_subword_only = align_labels_to_subwords(
+        word_ids,
+        example_labels,
+        label_all_subwords=False,
+    )
+    all_subwords = align_labels_to_subwords(
+        word_ids,
+        example_labels,
+        label_all_subwords=True,
+    )
+
+    continuation_positions = []
+    seen_word_indices = set()
+    for idx, word_idx in enumerate(word_ids):
+        if word_idx is None:
+            continue
+        if word_idx in seen_word_indices:
+            continuation_positions.append(idx)
+        else:
+            seen_word_indices.add(word_idx)
+
+    special_positions = [idx for idx, word_idx in enumerate(word_ids) if word_idx is None]
+    inc_continuation_positions = [idx for idx in continuation_positions if word_ids[idx] == 1]
+
+    assert inc_continuation_positions, "Expected 'Inc.' to split into continuation subwords."
+    assert all(first_subword_only[idx] == -100 for idx in continuation_positions)
+    assert all(all_subwords[idx] == LABEL2ID["I-ORG"] for idx in inc_continuation_positions)
+    assert all(first_subword_only[idx] == -100 for idx in special_positions)
+    assert all(all_subwords[idx] == -100 for idx in special_positions)
+
+    print(f"  Words:          {example_tokens}")
+    print(f"  Subwords:       {subword_tokens}")
+    print(f"  Word IDs:       {word_ids}")
+    print(f"  Default labels: {format_label_ids(first_subword_only)}")
+    print(f"  All-subwords:   {format_label_ids(all_subwords)}")
+
+
+def get_dataset_and_tokenizer(
+    model_name,
+    max_length=256,
+    run_checks=False,
+    label_all_subwords=False,
+):
     """
     One-shot loader for training scripts.
 
@@ -162,9 +265,19 @@ def get_dataset_and_tokenizer(model_name, max_length=256, run_checks=False):
 
     if run_checks:
         sanity_check_labels(grouped)
-        verify_alignment(grouped, tokenizer, max_length=max_length)
+        verify_alignment(
+            grouped,
+            tokenizer,
+            max_length=max_length,
+            label_all_subwords=label_all_subwords,
+        )
 
-    tokenized = tokenize_dataset(grouped, tokenizer, max_length=max_length)
+    tokenized = tokenize_dataset(
+        grouped,
+        tokenizer,
+        max_length=max_length,
+        label_all_subwords=label_all_subwords,
+    )
     return tokenized, tokenizer, grouped
 
 
@@ -173,3 +286,4 @@ if __name__ == "__main__":
     _, tokenizer, grouped = get_dataset_and_tokenizer("roberta-base", run_checks=False)
     sanity_check_labels(grouped)
     verify_alignment(grouped, tokenizer)
+    run_label_alignment_demo(tokenizer)
