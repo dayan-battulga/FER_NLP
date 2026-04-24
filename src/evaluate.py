@@ -20,6 +20,7 @@ with -100/special positions already removed).
 
 from __future__ import annotations
 
+import json
 import numpy as np
 import pandas as pd
 from seqeval.metrics import classification_report as seqeval_classification_report
@@ -58,23 +59,25 @@ def compute_seqeval_metrics(
     overall_accuracy = _token_level_accuracy(true_labels, predictions)
 
     results = {
-        "overall_precision": seqeval_precision(
-            true_labels, predictions, zero_division=0
+        "overall_precision": float(
+            seqeval_precision(true_labels, predictions, zero_division=0)
         ),
-        "overall_recall": seqeval_recall(true_labels, predictions, zero_division=0),
-        "overall_f1": seqeval_f1(true_labels, predictions, zero_division=0),
-        "overall_accuracy": overall_accuracy,
+        "overall_recall": float(
+            seqeval_recall(true_labels, predictions, zero_division=0)
+        ),
+        "overall_f1": float(seqeval_f1(true_labels, predictions, zero_division=0)),
+        "overall_accuracy": float(overall_accuracy),
     }
 
-    # Add per-entity-type breakdown
+    # Add per-entity-type breakdown (always include all entity types)
     for entity_type in ENTITY_TYPES:
-        if entity_type in report:
-            results[entity_type] = {
-                "precision": report[entity_type]["precision"],
-                "recall": report[entity_type]["recall"],
-                "f1": report[entity_type]["f1-score"],
-                "number": report[entity_type]["support"],
-            }
+        entity_report = report.get(entity_type, {})
+        results[entity_type] = {
+            "precision": float(entity_report.get("precision", 0.0)),
+            "recall": float(entity_report.get("recall", 0.0)),
+            "f1": float(entity_report.get("f1-score", 0.0)),
+            "number": int(entity_report.get("support", 0)),
+        }
 
     return results
 
@@ -136,7 +139,7 @@ def entity_span_confusion_matrix(
     A "match" requires both the type AND the exact (start, end) boundary to agree.
     This is the matrix that makes the ORG boundary problem visible.
     """
-    classes = ENTITY_TYPES + ["Spurious_or_Missed"]
+    classes = ENTITY_TYPES + ["Missed", "Spurious"]
     cm = pd.DataFrame(0, index=classes, columns=classes)
 
     for t_seq, p_seq in zip(true_labels, predictions):
@@ -154,11 +157,11 @@ def entity_span_confusion_matrix(
                 del p_by_span[span]
             else:
                 # Gold entity with no exact-span match in predictions
-                cm.loc[t_type, "Spurious_or_Missed"] += 1
+                cm.loc[t_type, "Missed"] += 1
 
         # Remaining predictions are spurious (no matching gold span)
         for span, p_type in p_by_span.items():
-            cm.loc["Spurious_or_Missed", p_type] += 1
+            cm.loc["Spurious", p_type] += 1
 
     return cm
 
@@ -196,6 +199,7 @@ def compute_detailed_metrics(
 
     metrics = {
         "token_weighted_f1": float(token_f1),
+        "token_level_accuracy": float(seqeval_results["overall_accuracy"]),
         "entity_overall_f1": float(seqeval_results["overall_f1"]),
         "entity_overall_precision": float(seqeval_results["overall_precision"]),
         "entity_overall_recall": float(seqeval_results["overall_recall"]),
@@ -223,6 +227,7 @@ def print_metrics_report(
     print("Metrics Report")
     print("=" * 60)
     print(f"Token-level Weighted F1: {metrics['token_weighted_f1']:.4f}")
+    print(f"Token-level Accuracy:    {metrics['token_level_accuracy']:.4f}")
     print(f"Entity-level Overall F1: {metrics['entity_overall_f1']:.4f}")
     print(f"  Precision: {metrics['entity_overall_precision']:.4f}")
     print(f"  Recall:    {metrics['entity_overall_recall']:.4f}")
@@ -285,8 +290,6 @@ def compute_metrics_delta(
 # -------------------------------------------------------------------
 def load_predictions(path: str) -> tuple[list[list[str]], list[list[str]]]:
     """Load saved predictions JSON and return (true_labels, predictions)."""
-    import json
-
     with open(path) as f:
         data = json.load(f)
     return data["true_labels"], data["predictions"]
@@ -302,4 +305,6 @@ if __name__ == "__main__":
         ["O", "B-PER", "I-PER", "O", "B-ORG", "I-ORG", "O", "O"],  # ORG boundary error
         ["B-LOC", "I-LOC", "O", "B-LOC", "O"],  # ORG→LOC type error
     ]
-    compute_detailed_metrics(true_labels, predictions, verbose=True)
+    smoke_metrics = compute_detailed_metrics(true_labels, predictions, verbose=True)
+    span_cm_dict = smoke_metrics["entity_span_confusion_matrix"]
+    assert "Missed" in span_cm_dict and "Spurious" in span_cm_dict
