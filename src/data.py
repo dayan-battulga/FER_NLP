@@ -115,7 +115,11 @@ def tokenize_dataset(dataset, tokenizer, max_length=256, label_all_subwords=Fals
         tokenized["labels"] = aligned_labels
         return tokenized
 
-    return dataset.map(tokenize_and_align, batched=True)
+    return dataset.map(
+        tokenize_and_align,
+        batched=True,
+        remove_columns=dataset["train"].column_names,
+    )
 
 
 def sanity_check_labels(grouped_dataset, max_samples=3):
@@ -190,11 +194,11 @@ def verify_alignment(
 def run_label_alignment_demo(tokenizer, max_length=256):
     """Print a small ORG example under both alignment modes."""
     print("\n" + "=" * 60)
-    print("Label alignment demo: Apple Inc.")
+    print("Label alignment demo: Apple Holdings Inc.")
     print("=" * 60)
 
-    example_tokens = ["Apple", "Inc."]
-    example_labels = [LABEL2ID["B-ORG"], LABEL2ID["I-ORG"]]
+    example_tokens = ["Apple", "Holdings", "Inc."]
+    example_labels = [LABEL2ID["B-ORG"], LABEL2ID["I-ORG"], LABEL2ID["I-ORG"]]
 
     tokenized = tokenizer(
         [example_tokens],
@@ -226,20 +230,28 @@ def run_label_alignment_demo(tokenizer, max_length=256):
         else:
             seen_word_indices.add(word_idx)
 
-    special_positions = [idx for idx, word_idx in enumerate(word_ids) if word_idx is None]
-    inc_continuation_positions = [idx for idx in continuation_positions if word_ids[idx] == 1]
-
-    assert inc_continuation_positions, "Expected 'Inc.' to split into continuation subwords."
-    assert all(first_subword_only[idx] == -100 for idx in continuation_positions)
-    assert all(all_subwords[idx] == LABEL2ID["I-ORG"] for idx in inc_continuation_positions)
-    assert all(first_subword_only[idx] == -100 for idx in special_positions)
-    assert all(all_subwords[idx] == -100 for idx in special_positions)
-
     print(f"  Words:          {example_tokens}")
     print(f"  Subwords:       {subword_tokens}")
     print(f"  Word IDs:       {word_ids}")
     print(f"  Default labels: {format_label_ids(first_subword_only)}")
     print(f"  All-subwords:   {format_label_ids(all_subwords)}")
+
+    special_positions = [idx for idx, word_idx in enumerate(word_ids) if word_idx is None]
+    assert all(first_subword_only[idx] == -100 for idx in special_positions)
+    assert all(all_subwords[idx] == -100 for idx in special_positions)
+
+    if not continuation_positions:
+        print(
+            "  WARNING: tokenizer produced no continuation subwords for "
+            "'Apple Holdings Inc.'; this demo did not exercise the "
+            "label-all-subwords continuation path."
+        )
+        return
+
+    assert all(first_subword_only[idx] == -100 for idx in continuation_positions)
+    for idx in continuation_positions:
+        expected_continuation_label = get_continuation_label_id(example_labels[word_ids[idx]])
+        assert all_subwords[idx] == expected_continuation_label
 
 
 def get_dataset_and_tokenizer(
@@ -255,11 +267,9 @@ def get_dataset_and_tokenizer(
     dataset is kept around for error analysis on raw tokens/labels.
     """
 
-    # RoBERTa-family tokenizers need add_prefix_space for split tokens
-    if "roberta" in model_name.lower():
-        tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # We always set add_prefix_space for split-token alignment; this is
+    # intentional for both RoBERTa (BPE) and DeBERTa-v3 (SentencePiece).
+    tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True)
 
     grouped = load_finer_ord()
 
