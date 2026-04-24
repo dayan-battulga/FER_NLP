@@ -18,7 +18,7 @@ numpy==1.26.4
 pandas==2.2.2
 
 # W&B
-wandb==0.17.7
+wandb==0.26.1
 
 # Other
 pyyaml==6.0.2
