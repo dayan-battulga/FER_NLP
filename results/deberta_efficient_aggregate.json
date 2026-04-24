@@ -1,0 +1,115 @@
+{
+  "config_path": "configs/baseline/deberta_efficient.yaml",
+  "config": {
+    "model_name": "microsoft/deberta-v3-large",
+    "seeds": [
+      88,
+      5768,
+      78516
+    ],
+    "learning_rate": 5e-05,
+    "batch_size": 8,
+    "num_epochs": 5,
+    "weight_decay": 0.01,
+    "early_stopping_patience": 7,
+    "early_stopping_threshold": 0.001,
+    "max_seq_length": 256,
+    "fp16": true,
+    "warmup_ratio": 0.1,
+    "lr_scheduler_type": "cosine",
+    "label_smoothing_factor": 0.0,
+    "label_all_subwords": true,
+    "llrd_decay": 0.9,
+    "head_lr": 5e-05,
+    "wandb_project": "finer-ord",
+    "wandb_tags": [
+      "phase-d",
+      "ablation",
+      "efficient-training",
+      "5-epoch",
+      "deberta-v3-large"
+    ],
+    "output_dir": "./results",
+    "use_crf": false,
+    "crf_learning_rate": null,
+    "use_distillation": false,
+    "teacher_checkpoint_path": null,
+    "distillation_temperature": null,
+    "distillation_alpha": null,
+    "save_total_limit": 2,
+    "resolved_seed": 88,
+    "config_path": "/tmp/deberta_efficient_seed88.yaml",
+    "run_id": "deberta_efficient_seed88_seed88"
+  },
+  "num_seeds": 3,
+  "run_ids": [
+    "deberta_efficient_seed88_seed88",
+    "deberta_efficient_seed5768_seed5768",
+    "deberta_efficient_seed78516_seed78516"
+  ],
+  "seeds": [
+    88,
+    5768,
+    78516
+  ],
+  "test_metrics": {
+    "token_weighted_f1": {
+      "mean": 0.983400680065884,
+      "std": 0.00033565069484947033
+    },
+    "entity_overall_f1": {
+      "mean": 0.8374216953240197,
+      "std": 0.0017771763783318338
+    },
+    "entity_per_class": {
+      "PER": {
+        "mean": 0.9393242935937295,
+        "std": 0.0008954601067719016
+      },
+      "LOC": {
+        "mean": 0.8373747747412738,
+        "std": 0.005631434001777107
+      },
+      "ORG": {
+        "mean": 0.7879968077489689,
+        "std": 0.004032379635330309
+      }
+    }
+  },
+  "validation_metrics": {
+    "entity_overall_f1": {
+      "mean": 0.9131322466413225,
+      "std": 0.004720351562253207
+    }
+  },
+  "train_time_min": {
+    "mean": 8.188893393583331,
+    "std": 0.019803587202300996
+  },
+  "seed_results": [
+    {
+      "run_id": "deberta_efficient_seed88_seed88",
+      "seed": 88,
+      "best_validation_entity_f1": 0.9140049140049141,
+      "test_entity_f1": 0.8359966358284272,
+      "train_time_min": 8.209121597700001,
+      "gpu_type": "NVIDIA A100-SXM4-40GB"
+    },
+    {
+      "run_id": "deberta_efficient_seed5768_seed5768",
+      "seed": 5768,
+      "best_validation_entity_f1": 0.9173553719008264,
+      "test_entity_f1": 0.8394129979035639,
+      "train_time_min": 8.169543660266664,
+      "gpu_type": "NVIDIA A100-SXM4-40GB"
+    },
+    {
+      "run_id": "deberta_efficient_seed78516_seed78516",
+      "seed": 78516,
+      "best_validation_entity_f1": 0.908036454018227,
+      "test_entity_f1": 0.8368554522400677,
+      "train_time_min": 8.188014922783328,
+      "gpu_type": "NVIDIA A100-SXM4-40GB"
+    }
+  ]
+}
