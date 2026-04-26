@@ -1,0 +1,34 @@
+# Phase 3 step A: Domain-adaptive pretraining (MLM) of RoBERTa-large on
+# FiNER-ORD train article text only. The downstream fine-tune in
+# `efficient_after_dapt.yaml` then loads this checkpoint.
+#
+# Critical correctness rules enforced by src/dapt.py:
+#   - Only the train split's articles are used.
+#   - Validation and test article doc_idx values are excluded by
+#     construction; src/dapt.py raises if any train article shares a
+#     doc_idx with val/test.
+#   - The packed corpus uses 512-token windows with no special tokens
+#     inserted between articles.
+#   - The saved encoder is loadable by AutoModelForTokenClassification
+#     and by the repo's CRF wrapper (AutoModel.from_pretrained on the
+#     same path).
+#
+# Wall-clock budget: roughly 30-45 minutes on an A100 for 2 epochs.
+
+model_name: roberta-large
+output_dir: ./results
+
+learning_rate: 1.0e-5
+num_train_epochs: 2
+batch_size: 8
+max_seq_length: 512
+weight_decay: 0.01
+warmup_ratio: 0.06
+lr_scheduler_type: linear
+mlm_probability: 0.15
+fp16: true
+seed: 88
+save_total_limit: 1
+
+wandb_project: finer-ord
+wandb_tags: [phase-3, dapt, roberta-large, mlm]

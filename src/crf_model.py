@@ -62,6 +62,111 @@ from src.train import (
 
 
 # -----------------------------------------------------------------------------
+# Emission extraction (used for logit-level ensembling across seeds)
+# -----------------------------------------------------------------------------
+
+
+def _select_inference_device() -> torch.device:
+    """Pick the best available device for a forward-only emission pass."""
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def extract_crf_emissions(
+    model: "RobertaCrfForTokenClassification",
+    dataset: Any,
+    tokenizer: Any,
+    batch_size: int,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    """Run forward-only over `dataset` and return per-example emissions.
+
+    The CRF transition matrix is intentionally NOT applied here; we save the
+    raw classifier emissions per token so multiple seeds can be averaged
+    before Viterbi decoding at ensemble time.
+
+    Returns three parallel lists, each of length len(dataset). For example i,
+    emissions[i] has shape (L_i, NUM_LABELS) and L_i = attention_mask.sum().
+    Labels include -100 sentinels for special tokens and continuation
+    subwords; ensemble code drops them at metric time.
+    """
+
+    device = _select_inference_device()
+    model = model.to(device)
+    model.eval()
+
+    collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
+
+    all_emissions: list[np.ndarray] = []
+    all_attention_masks: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+
+    n = len(dataset)
+    for start in range(0, n, batch_size):
+        batch_examples = [dataset[i] for i in range(start, min(start + batch_size, n))]
+        batch = collator(batch_examples)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels_cpu = batch["labels"]
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            emissions = outputs["emissions"]
+
+        emissions_np = emissions.detach().cpu().numpy()
+        attention_mask_np = attention_mask.detach().cpu().numpy()
+        labels_np = labels_cpu.numpy()
+
+        for row in range(emissions_np.shape[0]):
+            length = int(attention_mask_np[row].sum())
+            if length == 0:
+                continue
+            all_emissions.append(emissions_np[row, :length].astype(np.float16))
+            all_attention_masks.append(attention_mask_np[row, :length].astype(np.uint8))
+            all_labels.append(labels_np[row, :length].astype(np.int64))
+
+    return all_emissions, all_attention_masks, all_labels
+
+
+def save_emissions_npz(
+    path: Path,
+    emissions: list[np.ndarray],
+    attention_masks: list[np.ndarray],
+    labels: list[np.ndarray],
+) -> None:
+    """Persist per-example emissions, masks, and labels as object arrays."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        emissions=np.array(emissions, dtype=object),
+        attention_mask=np.array(attention_masks, dtype=object),
+        labels=np.array(labels, dtype=object),
+    )
+
+
+def save_crf_transitions(path: Path, model: "RobertaCrfForTokenClassification") -> None:
+    """Persist CRF transition matrices so seeds can be averaged at decode time."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        transitions=model.crf.transitions.detach().cpu().numpy().astype(np.float32),
+        start_transitions=model.crf.start_transitions.detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32),
+        end_transitions=model.crf.end_transitions.detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32),
+    )
+
+
+# -----------------------------------------------------------------------------
 # Model
 # -----------------------------------------------------------------------------
 
@@ -500,6 +605,35 @@ def run_single_seed_crf(
             predictions_path,
             {"true_labels": test_true_labels, "predictions": test_predictions},
         )
+
+        try:
+            test_emissions, test_masks, test_labels = extract_crf_emissions(
+                trainer.model,
+                dataset["test"],
+                tokenizer,
+                batch_size=config.batch_size,
+            )
+            save_emissions_npz(
+                run_dir / "test_emissions.npz",
+                test_emissions,
+                test_masks,
+                test_labels,
+            )
+            val_emissions, val_masks, val_labels = extract_crf_emissions(
+                trainer.model,
+                dataset["validation"],
+                tokenizer,
+                batch_size=config.batch_size,
+            )
+            save_emissions_npz(
+                run_dir / "val_emissions.npz",
+                val_emissions,
+                val_masks,
+                val_labels,
+            )
+            save_crf_transitions(run_dir / "crf_transitions.npz", trainer.model)
+        except Exception as exc:
+            print(f"[{run_id}] Failed to save emissions/transitions: {exc}")
 
         param_count = sum(p.numel() for p in trainer.model.parameters())
         config_hash = compute_config_hash(resolved_config)

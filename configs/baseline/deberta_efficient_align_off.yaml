@@ -1,0 +1,37 @@
+# Phase 2: DeBERTa-v3-large efficient recipe with first-subword-only alignment.
+#
+# The committed `deberta_efficient.yaml` flips two knobs simultaneously vs the
+# RoBERTa efficient run: it switches the backbone to DeBERTa-v3-large AND
+# enables `label_all_subwords=true`. This config isolates the alignment knob
+# by holding the (better) head_lr from Phase 2 and turning subword labeling
+# back to the first-subword-only default.
+#
+# If this variant beats `deberta_efficient_lr2e5` on 3-seed mean, the
+# label-all-subwords change is part of the regression. If it does not, the
+# alignment is fine and the head_lr was the issue.
+#
+# NOTE: keep `head_lr` aligned with the survivor of the LR sweep above
+# (currently set to 2.0e-5 to match deberta_efficient_lr2e5.yaml).
+
+model_name: microsoft/deberta-v3-large
+seeds: [88, 5768, 78516]
+learning_rate: 2.0e-5
+head_lr: 2.0e-5
+llrd_decay: 0.9
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+label_all_subwords: false
+use_crf: false
+use_distillation: false
+
+wandb_project: finer-ord
+wandb_tags: [phase-2, ablation, efficient-training, 5-epoch, deberta-v3-large, align-off]
+output_dir: ./results

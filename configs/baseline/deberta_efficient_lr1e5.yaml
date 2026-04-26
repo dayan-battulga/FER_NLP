@@ -1,0 +1,33 @@
+# Phase 2: DeBERTa-v3-large efficient recipe with a less aggressive head LR.
+#
+# The committed `deberta_efficient.yaml` uses head_lr=5e-5 with llrd_decay=0.9
+# and underperforms the RoBERTa-large efficient run (0.8374 vs 0.8481 mean).
+# Standard DeBERTa-v3-large NER recipes use head_lr in the 1e-5 to 2e-5 range.
+# This variant tests the lower end of that range while keeping every other
+# knob identical to deberta_efficient.yaml so the result is attributable.
+#
+# Expected behavior: smoother training at the cost of slightly slower fitting;
+# epoch-5 val entity F1 should land at >= 0.91 to clear the smoke gate.
+
+model_name: microsoft/deberta-v3-large
+seeds: [88, 5768, 78516]
+learning_rate: 1.0e-5
+head_lr: 1.0e-5
+llrd_decay: 0.9
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+label_all_subwords: true
+use_crf: false
+use_distillation: false
+
+wandb_project: finer-ord
+wandb_tags: [phase-2, ablation, efficient-training, 5-epoch, deberta-v3-large, lr-1e5]
+output_dir: ./results

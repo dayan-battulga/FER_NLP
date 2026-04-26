@@ -31,6 +31,13 @@ Take-home challenge for the ML/NLP Research Engineer internship at Dunedain. Bui
 - [x] Analysis notebooks now exist in `notebooks/`, including `compare_runs.ipynb`, `bio_fillter_testing.ipynb`, and `teacher_0_9_gap_analysis.ipynb`.
 - [x] The stricter CRF variant with valid-token-only packing and hard BIO constraints was tried locally, performed worse than the original CRF, and was reverted. The checked-in `src/crf_model.py` is back on the original `teacher_crf` behavior.
 - [x] Per-run artifacts are committed for the vanilla teacher, original CRF teacher, and efficient-training runs.
+- [x] Phase 1 vote-mode ensemble across the 3 saved seeds:
+  - `teacher_crf_vote_ensemble`: test entity F1 `0.8568` (vs 3-seed mean `0.8521`, +`0.0047`).
+  - `efficient_training_vote_ensemble`: test entity F1 `0.8551` (vs 3-seed mean `0.8481`, +`0.0070`).
+  - Both rows are appended to `results/results.csv` under `model=ensemble`.
+- [x] Logit-level ensembling is implemented but pending re-run on Colab to produce the per-seed `*_emissions.npz` / `*_logits.npz` artifacts that `scripts/ensemble_logits.py --mode logit` needs.
+- [x] Phase 2 DeBERTa-v3-large recipe-fix configs are checked in (`configs/baseline/deberta_efficient_lr1e5.yaml`, `deberta_efficient_lr2e5.yaml`, `deberta_efficient_align_off.yaml`); 3-seed runs themselves still need to happen on Colab.
+- [x] Phase 3 DAPT module (`src/dapt.py`) and configs (`configs/baseline/dapt_roberta_large.yaml`, `configs/baseline/efficient_after_dapt.yaml`) are checked in. The corpus builder excludes 4 articles that are duplicated across train and val/test, leaving 131/135 train articles (180 windows of 512 tokens, ~92k tokens). The DAPT and fine-tune runs themselves need to happen on Colab.
 - [ ] Teacher is not officially locked yet. The current choice is between using the original CRF as the teacher or leaning harder into the efficiency story.
 - [ ] Phase C vanilla student has not been run yet.
 - [ ] Phase C distilled student is not runnable yet. `src/distill.py` is still empty, and `src.train.py` raises `NotImplementedError` when `use_distillation: true`.
@@ -70,6 +77,10 @@ These are easy to get wrong. Do not.
 12. **Do not headline a single lucky seed.** `efficient_training_seed78516` is higher than the best CRF seed, but the efficient-training 3-seed mean is not.
 
 13. **Always annotate F1 comparisons with their epoch budget.** Vanilla teacher and CRF teacher ran for 30 epochs; `efficient_training` and `deberta_efficient` ran for 5 epochs. Comparing a 5-epoch result to a 30-epoch result without that context is misleading and has caused at least one planning mistake.
+
+14. **DAPT corpus must never include val/test articles.** FiNER-ORD has 4 articles whose train-side text is identical to a val/test article. `src/dapt.py::build_train_article_texts` filters these out before tokenization and prints a warning; do not bypass that filter.
+
+15. **Ensemble logit mode requires byte-identical gold labels and per-example lengths across seed dumps.** `scripts/ensemble_logits.py` asserts both. If tokenization changes between seeds, the dump shapes will diverge and the script will refuse to ensemble.
 
 ---
 
@@ -160,6 +171,26 @@ python -m src.train --config configs/baseline/efficient_training.yaml
 python scripts/bio_repair.py --predictions results/phase_b_teacher_seed5768/predictions.json --save
 python scripts/bio_repair.py --predictions results/teacher_crf_seed88/predictions.json --save
 
+# Phase 1 vote-mode ensemble on existing predictions.json (no GPU needed)
+python scripts/ensemble_logits.py --runs teacher_crf_seed88 teacher_crf_seed5768 teacher_crf_seed78516 --mode vote --output-name teacher_crf_vote_ensemble
+python scripts/ensemble_logits.py --runs efficient_training_seed88 efficient_training_seed5768 efficient_training_seed78516 --mode vote --output-name efficient_training_vote_ensemble
+
+# Phase 1 logit-mode ensemble (requires per-seed *_emissions.npz / *_logits.npz)
+# python scripts/ensemble_logits.py --runs teacher_crf_seed88 teacher_crf_seed5768 teacher_crf_seed78516 --mode logit --use-crf --output-name teacher_crf_logit_ensemble
+# python scripts/ensemble_logits.py --runs efficient_training_seed88 efficient_training_seed5768 efficient_training_seed78516 --mode logit --use-crf --output-name efficient_training_logit_ensemble
+
+# Phase 2 DeBERTa recipe fix (Colab CUDA)
+# python -m src.train --config configs/baseline/deberta_efficient_lr1e5.yaml
+# python -m src.train --config configs/baseline/deberta_efficient_lr2e5.yaml
+# python -m src.train --config configs/baseline/deberta_efficient_align_off.yaml
+
+# Phase 3 DAPT then 5-epoch fine-tune (Colab CUDA)
+# python -m src.dapt   --config configs/baseline/dapt_roberta_large.yaml
+# python -m src.train  --config configs/baseline/efficient_after_dapt.yaml
+
+# Phase 4 ensemble on top of DAPT seeds (after Phase 3 emits *_emissions.npz)
+# python scripts/ensemble_logits.py --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516 --mode logit --use-crf --output-name efficient_after_dapt_logit_ensemble
+
 # Phase C step 1, runnable today
 python -m src.train --config configs/baseline/student_vanilla.yaml
 
@@ -197,6 +228,10 @@ Add `--no-wandb` to `src.train` commands when logging is not desired.
 **Distillation state:** config fields exist, but the actual trainer is not implemented yet.
 
 **Subword alignment:** Both first-subword-only and label-all-subwords alignment are implemented in `src/data.py`. Behavior is controlled by the `label_all_subwords` config flag (default `false` for backward compatibility). DeBERTa efficient runs use `label_all_subwords=true`; all other committed runs use the default.
+
+**Ensembling:** `scripts/ensemble_logits.py` supports two modes. `--mode vote` runs a per-token majority vote across saved `predictions.json` files (no checkpoints needed). `--mode logit` averages saved `test_logits.npz` (vanilla) or `test_emissions.npz` plus `crf_transitions.npz` (CRF) across seeds and re-decodes once. The training paths in `src/train.py` and `src/crf_model.py` now save these artifacts automatically; existing committed seed runs predate that change and only have `predictions.json`.
+
+**DAPT:** `src/dapt.py` runs masked-LM continued pretraining on FiNER-ORD train article text only. The corpus builder excludes any train article whose full reconstructed text exactly matches a val/test article (4 such duplicates exist in FiNER-ORD; see the warning printed at corpus-build time). The saved checkpoint is loadable by both `AutoModelForTokenClassification.from_pretrained(...)` and the repo's CRF wrapper.
 
 **Tracking:** W&B project `finer-ord`, committed `results/results.csv`, committed `results/results_detailed.csv`, and aggregate JSONs for vanilla teacher, original CRF, and efficient training.
 

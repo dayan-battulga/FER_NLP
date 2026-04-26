@@ -1,0 +1,32 @@
+# Phase 2: DeBERTa-v3-large efficient recipe with a moderate head LR.
+#
+# Mid-point of the standard DeBERTa-v3-large NER head_lr range. Retains the
+# rest of the deberta_efficient.yaml recipe (LLRD 0.9, label_all_subwords=true,
+# cosine + warmup, 5 epochs) so the only knob that moves between this config
+# and deberta_efficient_lr1e5.yaml is the head LR magnitude.
+#
+# Expected behavior: faster fit than lr1e5 while still being safer than the
+# original 5e-5 setting that destabilizes DeBERTa at this budget.
+
+model_name: microsoft/deberta-v3-large
+seeds: [88, 5768, 78516]
+learning_rate: 2.0e-5
+head_lr: 2.0e-5
+llrd_decay: 0.9
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+label_all_subwords: true
+use_crf: false
+use_distillation: false
+
+wandb_project: finer-ord
+wandb_tags: [phase-2, ablation, efficient-training, 5-epoch, deberta-v3-large, lr-2e5]
+output_dir: ./results

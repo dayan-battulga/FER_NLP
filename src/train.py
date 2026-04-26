@@ -39,6 +39,79 @@ from src.evaluate import (
 
 
 # -----------------------------------------------------------------------------
+# Logit extraction (used for logit-level ensembling across seeds)
+# -----------------------------------------------------------------------------
+
+
+def _select_inference_device_train() -> torch.device:
+    """Pick the best available device for a forward-only logit pass."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def extract_token_logits(
+    model: torch.nn.Module,
+    dataset: Any,
+    tokenizer: Any,
+    batch_size: int,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    """Run forward-only over `dataset` and return per-example logits.
+
+    Mirrors src.crf_model.extract_crf_emissions for the vanilla path.
+    Returns three parallel lists of length len(dataset), where element i has
+    length L_i = attention_mask.sum() for example i.
+    """
+    device = _select_inference_device_train()
+    model = model.to(device)
+    model.eval()
+    collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
+    all_logits: list[np.ndarray] = []
+    all_attention_masks: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+    n = len(dataset)
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        batch_examples = [dataset[i] for i in range(start, end)]
+        batch = collator(batch_examples)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels_cpu = batch["labels"]
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+        logits_np = logits.detach().cpu().numpy()
+        attention_mask_np = attention_mask.detach().cpu().numpy()
+        labels_np = labels_cpu.numpy()
+        for row in range(logits_np.shape[0]):
+            length = int(attention_mask_np[row].sum())
+            if length == 0:
+                continue
+            all_logits.append(logits_np[row, :length].astype(np.float16))
+            all_attention_masks.append(attention_mask_np[row, :length].astype(np.uint8))
+            all_labels.append(labels_np[row, :length].astype(np.int64))
+    return all_logits, all_attention_masks, all_labels
+
+
+def save_logits_npz(
+    path: Path,
+    logits: list[np.ndarray],
+    attention_masks: list[np.ndarray],
+    labels: list[np.ndarray],
+) -> None:
+    """Persist per-example logits, masks, and labels as object arrays."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        logits=np.array(logits, dtype=object),
+        attention_mask=np.array(attention_masks, dtype=object),
+        labels=np.array(labels, dtype=object),
+    )
+
+
+# -----------------------------------------------------------------------------
 # CSV schemas
 # -----------------------------------------------------------------------------
 
@@ -797,6 +870,34 @@ def run_single_seed(
             predictions_path,
             {"true_labels": test_true_labels, "predictions": test_predictions},
         )
+
+        try:
+            test_logits, test_masks, test_labels = extract_token_logits(
+                trainer.model,
+                dataset["test"],
+                tokenizer,
+                batch_size=config.batch_size,
+            )
+            save_logits_npz(
+                run_dir / "test_logits.npz",
+                test_logits,
+                test_masks,
+                test_labels,
+            )
+            val_logits, val_masks, val_labels = extract_token_logits(
+                trainer.model,
+                dataset["validation"],
+                tokenizer,
+                batch_size=config.batch_size,
+            )
+            save_logits_npz(
+                run_dir / "val_logits.npz",
+                val_logits,
+                val_masks,
+                val_labels,
+            )
+        except Exception as exc:
+            print(f"[{run_id}] Failed to save logits: {exc}")
 
         # Parameter count is logged because it feeds directly into later
         # efficiency comparisons and Pareto chart generation.

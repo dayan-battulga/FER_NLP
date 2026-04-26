@@ -1,0 +1,37 @@
+# Phase 3 step B: 5-epoch efficient fine-tune starting from the DAPT
+# encoder produced by `configs/baseline/dapt_roberta_large.yaml`.
+#
+# This config is a clone of `configs/baseline/efficient_training.yaml`
+# with one change: `model_name` points at the DAPT checkpoint instead
+# of the public `roberta-large` weights. Everything else is held fixed
+# so the F1 delta vs efficient_training is attributable to DAPT only.
+#
+# Prerequisite: run `python -m src.dapt --config configs/baseline/dapt_roberta_large.yaml`
+# first. The DAPT script writes the encoder to:
+#   ./results/dapt_roberta-large/checkpoint-final/
+# which is the path used below. If you DAPT a different backbone, update
+# `model_name` to match the saved directory name.
+#
+# Expected wall-clock: ~22-25 minutes for 3 seeds on an A100.
+# Expected entity F1 lift over efficient_training: +1 to +2.5 points.
+
+model_name: ./results/dapt_roberta-large/checkpoint-final
+seeds: [88, 5768, 78516]
+learning_rate: 3.0e-5
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+
+use_crf: true
+crf_learning_rate: 1.0e-4
+
+wandb_project: finer-ord
+wandb_tags: [phase-3, efficient-after-dapt, 5-epoch, crf, roberta-large]
+output_dir: ./results
