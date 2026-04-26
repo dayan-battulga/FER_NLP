@@ -45,22 +45,17 @@ Take-home challenge for the ML/NLP Research Engineer internship at Dunedain. Bui
   - All three DAPT seeds beat the `efficient_training` mean (0.8481), so the lift is real, not seed luck.
   - `efficient_after_dapt` (5-epoch fine-tune) also beats the original `teacher_crf` (30-epoch, `0.8521`), making it the new leading 5-epoch result.
 - [x] Phase 4 ensembles on top of `efficient_after_dapt` seeds:
-  - `efficient_after_dapt_logit_ensemble` (CRF logit averaging + Viterbi re-decode): test entity F1 **`0.8634`** (PER `0.9564`, LOC `0.8590`, ORG `0.8206`). This was the headline number going into Phase 5.
+  - `efficient_after_dapt_logit_ensemble` (CRF logit averaging + Viterbi re-decode): test entity F1 **`0.8634`** (PER `0.9564`, LOC `0.8590`, ORG `0.8206`). **This is the current headline number.**
   - `efficient_after_dapt_vote_ensemble` (per-token vote): `0.8587`.
-- [x] Phase 5 scaffolding landed (DAPT v2 with FNSPID corpus, packed-512 re-inference, Dice spike). Code is in repo; nothing has been run yet.
-  - New corpus builder `src/dapt_corpus.py` streams a 100k FNSPID subsample, optionally filters cc_news to a fixed finance-domain list, and reserves a deterministic 5-article FiNER held-out probe for MLM perplexity.
-  - `src/dapt.py` consumes the new fields (`corpus_source`, `include_cc_news`, `fnspid_subsample`, `held_out_probe_size`), bumps `logging_steps` to 100, and records held-out FiNER MLM perplexity per epoch plus a base-vs-final comparison.
-  - `configs/baseline/dapt_roberta_large_v2.yaml` and `configs/baseline/efficient_after_dapt_v2.yaml` wire up Phase 5a/5b.
-  - `scripts/reinfer_packed.py` implements Phase 5c packed-window 512-length re-inference with greedy within-doc packing, per-sentence slicing, and per-sentence Viterbi re-decode (CRF) or argmax (vanilla).
-  - `src/losses.py` adds self-adjusting `DiceLoss`; `src/train.py` accepts `loss_type: ce|dice` and raises on the CRF + Dice combination.
-  - `configs/baseline/efficient_dice_seed88.yaml` wires up the Phase 5d single-seed exploratory spike.
-- [ ] Phase 5a (DAPT v2 on FNSPID + FiNER train) has not been run. Acceptance gate: held-out FiNER MLM perplexity at least 5% lower than the base `roberta-large` checkpoint.
-- [ ] Phase 5b (`efficient_after_dapt_v2` 3-seed fine-tune) has not been run. Acceptance gate: 3-seed mean test entity F1 >= `0.86`, OR Phase 5e ensemble F1 >= `0.875`.
-- [ ] Phase 5c packed-512 re-inference has not been run. Validation pass first; only run on test if validation delta is non-negative.
-- [ ] Phase 5d Dice spike has not been run. Acceptance gate: seed 88 entity F1 lifts >= +0.005 over `efficient_training_seed88` (~0.8467).
-- [ ] Phase 5e refreshed ensembles (v2 single-recipe and 6-model multi-recipe) have not been run. The 6-model gate triggers whenever Phase 5b mean does not regress below v1's `0.8548`.
-- [ ] Phase 5 hard time-box decision date: **TBD by Dayan**. After this date, freeze whatever state exists, declare the current best ensemble the headline, and start Phase C the next day. Phase C is contractual; another `0.005` of teacher F1 is not.
-- [ ] Teacher is not officially locked yet. Phase 5f locks the teacher after Phase 5e completes (or at the time-box, whichever comes first).
+- [x] FNSPID-based DAPT v2 was attempted in code but abandoned before running. The dataset (`Zihan1004/FNSPID`) had a high fraction of summary-only rows on the Colab pull, making the corpus builder unreliable, and the multi-source / non-commercial license complications outweighed the expected lift over v1. All FNSPID/cc_news scaffolding (`src/dapt_corpus.py`, `dapt_roberta_large_v2.yaml`, `efficient_after_dapt_v2.yaml`, the held-out perplexity probe) was reverted. We stay on v1 DAPT (FiNER train articles only).
+- [x] Remaining Phase 5 scaffolding that survived the revert and is still relevant:
+  - `scripts/reinfer_packed.py` implements packed-window 512-length re-inference with greedy within-doc packing, per-sentence slicing, and per-sentence Viterbi re-decode (CRF) or argmax (vanilla). Applies to any saved RoBERTa-large checkpoint, including `efficient_after_dapt_seed*`.
+  - `src/losses.py` adds self-adjusting `DiceLoss`; `src/train.py` accepts `loss_type: ce|dice` and the trainer combines `CE + Dice` per Li et al. 2020 Section 4.4. CRF + Dice is hard-guarded.
+  - `configs/baseline/efficient_dice_seed88.yaml` wires up the single-seed exploratory Dice spike (vanilla path only).
+- [ ] Phase 5c packed-512 re-inference has not been run. Validation pass first on `efficient_after_dapt_seed*`; only run on test if validation delta is non-negative.
+- [ ] Phase 5d Dice spike has not been run successfully yet. The first attempt collapsed to all-O because of `alpha=0.01` and pure-dice (no CE). Config now uses `alpha=0.6`, excludes `O` from the dice mean, and runs `CE + 1.0 * Dice`. Acceptance gate: seed 88 entity F1 lifts >= +0.005 over `efficient_training_seed88` (~0.8467).
+- [ ] Phase 5e: 6-model multi-recipe ensemble (`efficient_after_dapt_*` + `teacher_crf_*`) is blocked on re-extracting `*_emissions.npz` and `crf_transitions.npz` for the existing `teacher_crf_*` runs (they predate the auto-save). A small standalone extract pass on Colab unblocks it.
+- [ ] Phase 5f teacher lock: the current best ensemble (`efficient_after_dapt_logit_ensemble` at `0.8634`) is the leading candidate to lock as the teacher and hand off to Phase C.
 - [ ] Phase C vanilla student has not been run yet.
 - [ ] Phase C distilled student is not runnable yet. `src/distill.py` is still empty, and `src.train.py` raises `NotImplementedError` when `use_distillation: true`.
 - [ ] Quantization, latency, and Pareto chart scripts do not exist yet.
@@ -104,13 +99,13 @@ These are easy to get wrong. Do not.
 
 15. **Ensemble logit mode requires byte-identical gold labels and per-example lengths across seed dumps.** `scripts/ensemble_logits.py` asserts both. If tokenization changes between seeds, the dump shapes will diverge and the script will refuse to ensemble.
 
-16. **DAPT corpus dedup must run on URL hash AND content hash, in that order.** `src/dapt_corpus.py` URL-dedups first; rows without URLs fall back to body SHA-256. The val/test leak filter compares body SHA-256 against the FiNER val/test article hashes regardless of source. Do not relax this to URL-only or content-only.
+16. **DAPT stays on FiNER train articles only.** Multi-source DAPT (FNSPID, cc_news, etc.) was attempted and abandoned. `src/dapt.py::build_train_article_texts` is the only supported corpus builder; it filters out the 4 FiNER train articles whose text is identical to a val/test article. Do not reintroduce external corpora without an explicit go-ahead.
 
-17. **Phase 5d keeps Dice Loss and CRF strictly separate.** `TrainConfig.__post_init__` raises if `loss_type=dice` and `use_crf=true`. CRF NLL and Dice do not compose cleanly; the spike is restricted to the vanilla path on a single seed. Do not silently relax this guard.
+17. **Dice Loss and CRF stay strictly separate.** `TrainConfig.__post_init__` raises if `loss_type=dice` and `use_crf=true`. CRF NLL and Dice do not compose cleanly; the spike is restricted to the vanilla path on a single seed. Do not silently relax this guard.
 
-18. **Phase 5 has a hard time-box.** When the date set by Dayan passes, freeze the state, declare the current best ensemble the headline, and start Phase C the next day. Phase C (student, distillation, Pareto, `REPORT.md`) is a contractual deliverable; another `0.005` of teacher F1 is not. Do not slip the gate to chase additional teacher experiments.
+18. **Dice Loss runs as `CE + Dice`, not pure Dice.** Pure dice on FiNER's 95% O distribution collapses to predicting O everywhere (entity F1 = 0.0, grad norm ~0.007). Li et al. 2020 Section 4.4 explicitly recommends combining dice with CE; the trainer defaults to `dice_ce_weight: 1.0`. Use `dice_alpha: 0.6` and `dice_outside_label_id: 0` (paper recommendation, exclude O from the dice mean).
 
-19. **Phase 5c packed-512 inference runs validation before test.** Position embeddings 256-511 saw pretrain context but never saw FiNER fine-tune context. The lift could be modest or negative; burn the validation signal on this debug, not the test signal. Only run on test if the validation delta vs the same checkpoint at 256 is non-negative.
+19. **Packed-512 re-inference runs validation before test.** Position embeddings 256-511 saw pretrain context but never saw FiNER fine-tune context. The lift could be modest or negative; burn the validation signal on this debug, not the test signal. Only run on test if the validation delta vs the same checkpoint at 256 is non-negative.
 
 ---
 
@@ -133,10 +128,8 @@ finer-ord/
 │       ├── student_distilled.yaml
 │       ├── efficient_training.yaml
 │       ├── efficient_after_dapt.yaml
-│       ├── efficient_after_dapt_v2.yaml
 │       ├── efficient_dice_seed88.yaml
 │       ├── dapt_roberta_large.yaml
-│       ├── dapt_roberta_large_v2.yaml
 │       ├── label_smoothing.yaml
 │       ├── deberta_smoke.yaml
 │       ├── deberta_efficient.yaml
@@ -153,9 +146,8 @@ finer-ord/
 │   ├── evaluate.py              # seqeval + token metrics + confusion matrices
 │   ├── train.py                 # vanilla multi-seed training entrypoint (CE / Dice)
 │   ├── crf_model.py             # original CRF training path (restored)
-│   ├── losses.py                # custom losses (DiceLoss for Phase 5d)
-│   ├── dapt.py                  # MLM continued pretraining + held-out probe
-│   ├── dapt_corpus.py           # multi-source DAPT corpus builder (Phase 5)
+│   ├── losses.py                # custom losses (DiceLoss for the Dice spike)
+│   ├── dapt.py                  # MLM continued pretraining on FiNER train articles only
 │   ├── distill.py               # placeholder, currently empty
 │   └── finer-ord.py             # HF dataset inspection helper
 ├── scripts/
@@ -234,24 +226,15 @@ python scripts/ensemble_logits.py --runs efficient_training_seed88 efficient_tra
 # Phase 4 ensemble on top of DAPT seeds (after Phase 3 emits *_emissions.npz)
 # python scripts/ensemble_logits.py --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516 --mode logit --use-crf --output-name efficient_after_dapt_logit_ensemble
 
-# Phase 5a DAPT v2 (FNSPID + FiNER train, ~3-7 hours on Colab A100)
-# python -m src.dapt   --config configs/baseline/dapt_roberta_large_v2.yaml
+# Phase 5c packed-512 re-inference on existing v1 DAPT seeds (val FIRST, test only if val passes)
+# python scripts/reinfer_packed.py --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516 --mode crf --split val
+# python scripts/reinfer_packed.py --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516 --mode crf --split test
 
-# Phase 5b efficient fine-tune on the v2 DAPT checkpoint
-# python -m src.train  --config configs/baseline/efficient_after_dapt_v2.yaml
-
-# Phase 5c packed-512 re-inference (validation FIRST, test only if val passes)
-# python scripts/reinfer_packed.py --runs efficient_after_dapt_v2_seed88 efficient_after_dapt_v2_seed5768 efficient_after_dapt_v2_seed78516 --mode crf --split val
-# python scripts/reinfer_packed.py --runs efficient_after_dapt_v2_seed88 efficient_after_dapt_v2_seed5768 efficient_after_dapt_v2_seed78516 --mode crf --split test
-
-# Phase 5d Dice Loss spike, single seed (vanilla, exploratory only)
+# Dice Loss spike, single seed (vanilla, exploratory only)
 # python -m src.train  --config configs/baseline/efficient_dice_seed88.yaml
 
-# Phase 5e refreshed v2 ensemble (after Phase 5b emits *_emissions.npz)
-# python scripts/ensemble_logits.py --runs efficient_after_dapt_v2_seed88 efficient_after_dapt_v2_seed5768 efficient_after_dapt_v2_seed78516 --mode logit --use-crf --output-name efficient_after_dapt_v2_logit_ensemble
-
-# Phase 5e 6-model multi-recipe ensemble (after teacher_crf_* emissions are re-extracted)
-# python scripts/ensemble_logits.py --runs efficient_after_dapt_v2_seed88 efficient_after_dapt_v2_seed5768 efficient_after_dapt_v2_seed78516 teacher_crf_seed88 teacher_crf_seed5768 teacher_crf_seed78516 --mode logit --use-crf --output-name multi_recipe_logit_ensemble_6m
+# 6-model multi-recipe ensemble (after teacher_crf_* emissions are re-extracted)
+# python scripts/ensemble_logits.py --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516 teacher_crf_seed88 teacher_crf_seed5768 teacher_crf_seed78516 --mode logit --use-crf --output-name multi_recipe_logit_ensemble_6m
 
 # Phase C step 1, runnable today
 python -m src.train --config configs/baseline/student_vanilla.yaml

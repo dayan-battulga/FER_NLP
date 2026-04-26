@@ -1,0 +1,76 @@
+# Ablation: efficient_after_dapt + label_all_subwords + LLRD.
+#
+# Tests stacking two well-known token-classification best-practices on top
+# of the current best 5-epoch recipe (DAPT'd encoder + 5-epoch CRF
+# fine-tune). Both flags individually have only been tested on DeBERTa-v3-large,
+# where the entire family underperformed RoBERTa-large; this is the first
+# isolated test on RoBERTa-large.
+#
+# Recipe relative to efficient_after_dapt.yaml (only these three keys differ):
+#   - label_all_subwords: true
+#       For multi-subword entities, continuation subwords inherit I-X
+#       instead of -100. ~50% more entity-token gradient signal,
+#       especially helpful for the long ORG names that drive the
+#       remaining error mass.
+#   - head_lr: 3.0e-5
+#       Top of the LLRD ladder. Set equal to the existing `learning_rate`
+#       so the top encoder layer's effective LR (3e-5 * 0.9 ≈ 2.7e-5)
+#       roughly matches the previous flat backbone LR.
+#   - llrd_decay: 0.9
+#       24-layer RoBERTa-large; embeddings end at ~3e-5 * 0.9^24 ≈ 2.4e-6.
+#       Protects DAPT-acquired representations in the lower layers from
+#       being overwritten during the 5-epoch fine-tune.
+#
+# crf_learning_rate stays at 1.0e-4 so the classifier + CRF head ratio vs
+# the backbone is preserved. Anything else held fixed isolates the
+# LAS + LLRD effect.
+#
+# Prerequisite: run `configs/baseline/dapt_roberta_large.yaml` first to
+# produce the encoder at `./results/dapt_roberta-large/checkpoint-final/`.
+#
+# Wall-clock budget: ~7 min per seed on A100, ~21 min total for 3 seeds
+# (same as efficient_after_dapt).
+#
+# Acceptance: 3-seed mean test entity F1 >= 0.858 (i.e., >= +0.003 over
+# `efficient_after_dapt`'s mean of 0.8548). The std on that baseline is
+# 0.0038, so smaller deltas sit inside the seed-noise band and shouldn't
+# be claimed as a real effect.
+#
+# Secondary acceptance: if the single-model mean lands in the noise band
+# but the 3-seed logit ensemble of these runs lifts >= +0.003 over the
+# 0.8634 efficient_after_dapt logit ensemble (i.e., >= 0.866), that's a
+# real ensemble-level result worth keeping.
+
+model_name: ./results/dapt_roberta-large/checkpoint-final
+seeds: [88, 5768, 78516]
+learning_rate: 3.0e-5
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+
+use_crf: true
+crf_learning_rate: 1.0e-4
+
+label_all_subwords: true
+head_lr: 3.0e-5
+llrd_decay: 0.9
+
+wandb_project: finer-ord
+wandb_tags:
+  [
+    efficient-after-dapt-lasllrd,
+    5-epoch,
+    crf,
+    roberta-large,
+    ablation,
+    label-all-subwords,
+    llrd,
+  ]
+output_dir: ./results

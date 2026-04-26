@@ -1150,11 +1150,6 @@ def run_training(
 
     # Keep future experiment modes explicit instead of silently ignoring them.
     if config.use_crf:
-        if config.llrd_decay is not None:
-            raise ValueError(
-                "`llrd_decay` is only supported in the vanilla training path. "
-                "Set `use_crf: false` or remove `llrd_decay`."
-            )
         from src.crf_model import run_crf_training
 
         run_crf_training(
