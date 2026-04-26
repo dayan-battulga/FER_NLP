@@ -922,10 +922,6 @@ def run_crf_training(
 
     if not config.use_crf:
         raise ValueError("run_crf_training called with use_crf=False.")
-    if config.use_distillation:
-        raise NotImplementedError(
-            "CRF + distillation is not supported; run Phase B first, then Phase C."
-        )
 
     config_stem = Path(config_path).stem
     output_root = Path(config.output_dir)

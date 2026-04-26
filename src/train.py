@@ -176,10 +176,6 @@ class TrainConfig:
     output_dir: str = "./results"
     use_crf: bool = False
     crf_learning_rate: float | None = None
-    use_distillation: bool = False
-    teacher_checkpoint_path: str | None = None
-    distillation_temperature: float | None = None
-    distillation_alpha: float | None = None
     save_total_limit: int = 2
     loss_type: str = "ce"
     dice_smooth: float = 1.0
@@ -208,7 +204,6 @@ class TrainConfig:
         self.head_lr = float(self.head_lr) if self.head_lr is not None else None
         self.save_total_limit = int(self.save_total_limit)
         self.use_crf = bool(self.use_crf)
-        self.use_distillation = bool(self.use_distillation)
 
         # Treat missing tags as an empty list so later logging code does not
         # need to branch on None vs [].
@@ -1025,8 +1020,7 @@ def run_single_seed(
         except Exception as exc:
             print(f"[{run_id}] Failed to save logits: {exc}")
 
-        # Parameter count is logged because it feeds directly into later
-        # efficiency comparisons and Pareto chart generation.
+        # Parameter count is logged for experiment comparison and reporting.
         param_count = sum(parameter.numel() for parameter in trainer.model.parameters())
         config_hash = compute_config_hash(resolved_config)
 
@@ -1159,11 +1153,6 @@ def run_training(
             disable_wandb=disable_wandb,
         )
         return
-    if config.use_distillation:
-        raise NotImplementedError(
-            "This config enables `use_distillation=true`, but distillation is "
-            "reserved for `src/distill.py` and is not implemented in `src.train.py` yet."
-        )
 
     config_stem = Path(config_path).stem
     output_root = Path(config.output_dir)

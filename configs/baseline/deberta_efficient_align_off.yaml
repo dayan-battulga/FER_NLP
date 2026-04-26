@@ -30,8 +30,6 @@ lr_scheduler_type: cosine
 label_smoothing_factor: 0.0
 label_all_subwords: false
 use_crf: false
-use_distillation: false
-
 wandb_project: finer-ord
 wandb_tags: [phase-2, ablation, efficient-training, 5-epoch, deberta-v3-large, align-off]
 output_dir: ./results

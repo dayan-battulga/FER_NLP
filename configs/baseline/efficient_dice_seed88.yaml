@@ -14,7 +14,7 @@
 # a CRF integration that may eat the lift.
 #
 # If the spike clears +0.005: document as a follow-up direction only; do
-# NOT escalate to 3 seeds inside Phase 5 (would compete with Phase C time).
+# Do not escalate to 3 seeds unless the single-seed validation/test signal is real.
 # If the spike does not clear +0.005: drop and document the negative result.
 #
 # Wall-clock: ~7 min single-seed run on A100, parallelizable with Phase 5a.

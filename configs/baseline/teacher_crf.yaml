@@ -10,7 +10,7 @@
 #
 # Expected wall-clock: ~20% slower per step than vanilla = ~5-7 hours for 3 seeds.
 # Expected entity F1: +1-3 points over vanilla RoBERTa-large.
-# If F1 exceeds vanilla teacher, this becomes THE teacher for distillation.
+# Historical CRF comparison. The current performance path is efficient_after_dapt.
 
 model_name: roberta-large
 seeds: [88, 5768, 78516]

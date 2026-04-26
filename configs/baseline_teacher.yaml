@@ -9,7 +9,7 @@
 #
 # Expected wall-clock: ~4-6 hours on a single GPU for all 3 seeds.
 # Expected entity F1: 0.86-0.88 (up from 0.8471 on one undertrained seed).
-# This becomes the TEACHER for distillation unless CRF variant wins.
+# Historical vanilla RoBERTa-large baseline.
 
 model_name: roberta-large
 seeds: [88, 5768, 78516]

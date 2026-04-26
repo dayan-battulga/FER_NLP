@@ -108,9 +108,8 @@ class DiceLoss(nn.Module):
         flat_logits = logits.reshape(-1, self.num_labels)
         flat_labels = labels.reshape(-1)
 
-        # Mask -100 BEFORE the softmax/one-hot to match the masking convention
-        # used by KL distillation later. Doing it after produces nonsense
-        # gradients on the ignored positions.
+        # Mask -100 before softmax/one-hot so ignored subwords do not produce
+        # nonsense gradients.
         valid_mask = flat_labels != self.ignore_index
         if not torch.any(valid_mask):
             return logits.sum() * 0.0
