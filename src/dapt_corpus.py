@@ -101,6 +101,9 @@ class CorpusSpec:
     fnspid_dataset_id: str = "Zihan1004/FNSPID"
     cc_news_dataset_id: str = "vblagoje/cc_news"
     fnspid_min_median_chars: int = 1000
+    fnspid_sanity_sample_size: int = 100
+    fnspid_sanity_max_rows_scanned: int = 50_000
+    fnspid_progress_every: int = 5_000
     per_article_min_chars: int = 200
     seed: int = 88
 
@@ -282,20 +285,55 @@ def _stream_fnspid(
                     break
 
         body = row.get(body_field)
-        if isinstance(body, str) and n_seen <= 100:
-            sample_lens.append(len(body))
 
-        if not sanity_done and n_seen >= 100:
-            median_chars = statistics.median(sample_lens) if sample_lens else 0.0
-            if median_chars < spec.fnspid_min_median_chars:
-                raise RuntimeError(
-                    "FNSPID body sanity check failed: median first-100 length is "
-                    f"{median_chars:.0f} chars, expected >= "
-                    f"{spec.fnspid_min_median_chars}. Aborting; consider falling back "
-                    "to cc_news + FiNER-train (set `corpus_source: finer_train_only` "
-                    "or disable this dataset)."
+        # Sanity sample: collect lengths only from rows that actually have a
+        # string body. FNSPID has a non-trivial fraction of summary-only rows
+        # where `Article` is None, so "first 100 rows" can be all nulls and
+        # never represent the real population. We instead require N actual
+        # string bodies before deciding, and bail if we scan too many rows
+        # without finding enough.
+        if not sanity_done:
+            if isinstance(body, str) and len(body) > 0:
+                sample_lens.append(len(body))
+            if len(sample_lens) >= spec.fnspid_sanity_sample_size:
+                median_chars = float(statistics.median(sample_lens))
+                if median_chars < spec.fnspid_min_median_chars:
+                    raise RuntimeError(
+                        "FNSPID body sanity check failed: median over "
+                        f"{len(sample_lens)} string-bodied rows is "
+                        f"{median_chars:.0f} chars, expected >= "
+                        f"{spec.fnspid_min_median_chars}. Aborting; consider "
+                        "falling back to cc_news + FiNER-train (set "
+                        "`corpus_source: finer_train_only` and "
+                        "`include_cc_news: true`)."
+                    )
+                sanity_done = True
+                print(
+                    f"FNSPID sanity check OK: median over "
+                    f"{len(sample_lens)} string bodies is "
+                    f"{median_chars:.0f} chars (threshold "
+                    f"{spec.fnspid_min_median_chars}). Scanned {n_seen} rows."
                 )
-            sanity_done = True
+            elif n_seen >= spec.fnspid_sanity_max_rows_scanned:
+                raise RuntimeError(
+                    f"FNSPID body sanity check failed: only "
+                    f"{len(sample_lens)} of the first {n_seen} rows had a "
+                    f"string body, expected >= "
+                    f"{spec.fnspid_sanity_sample_size}. The dataset appears "
+                    "to be dominated by summary-only rows (no `Article` "
+                    "field). Fall back to cc_news + FiNER-train."
+                )
+
+        if (
+            spec.fnspid_progress_every > 0
+            and n_seen % spec.fnspid_progress_every == 0
+        ):
+            print(
+                f"  FNSPID stream: scanned {n_seen} rows, kept {len(kept)} "
+                f"(target {spec.fnspid_subsample}); dropped "
+                f"too_short={n_too_short}, dup_url={n_dup_url}, "
+                f"dup_body={n_dup_body}, leak={n_leaked}"
+            )
 
         if not isinstance(body, str) or len(body) < spec.per_article_min_chars:
             n_too_short += 1
@@ -324,13 +362,14 @@ def _stream_fnspid(
         if len(kept) >= spec.fnspid_subsample:
             break
 
-    if not sanity_done:
-        median_chars = statistics.median(sample_lens) if sample_lens else 0.0
-        if median_chars < spec.fnspid_min_median_chars:
-            raise RuntimeError(
-                "FNSPID body sanity check failed: median observed length is "
-                f"{median_chars:.0f} chars over {n_seen} rows."
-            )
+    # If we exhausted the stream before reaching the sanity threshold, decide
+    # based on what we did see. An empty kept list is the real failure; a
+    # short median over a small sample is just informational.
+    if not sanity_done and not kept:
+        raise RuntimeError(
+            f"FNSPID stream produced no usable bodies after {n_seen} rows. "
+            "Fall back to cc_news + FiNER-train."
+        )
 
     diagnostics = {
         "num_rows_seen": n_seen,
