@@ -38,9 +38,32 @@ label_smoothing_factor: 0.0
 use_crf: false
 
 # Phase 5d additions.
+#
+# Hyperparameters are calibrated to actually train, not to maximize
+# fidelity to the (broken) original plan. Earlier values were:
+#
+#   dice_alpha: 0.01            # disabled the self-adjusting factor
+#   dice_outside_label_id: None # included `O` in the mean
+#   ce_weight: 0.0              # pure dice
+#
+# That collapsed to predicting `O` everywhere (entity F1 = 0.0, grad
+# norm ~0.007) on FiNER's 95% O distribution. The new defaults:
+#
+#   - alpha=0.6                 # paper-recommended for NER
+#   - exclude `O` from dice     # standard NER practice
+#   - CE + 1.0 * Dice           # Li et al. 2020 Section 4.4 explicitly
+#                                 recommends combining dice with CE; pure
+#                                 dice on a 7-class softmax has too-weak
+#                                 gradients to escape the all-O attractor.
+#
+# This makes the spike a "does dice as a regularizer on top of CE help
+# vs plain CE?" experiment, which is the actually useful comparison.
 loss_type: dice
 dice_smooth: 1.0
-dice_alpha: 0.01
+dice_alpha: 0.6
+dice_outside_label_id: 0
+dice_ce_weight: 1.0
+dice_weight: 1.0
 
 wandb_project: finer-ord
 wandb_tags: [phase-5, dice-loss, exploratory, vanilla, 5-epoch, single-seed]

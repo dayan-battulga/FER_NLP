@@ -32,10 +32,19 @@ class DiceLoss(nn.Module):
     where `p_ic` is the predicted probability of class c at position i and
     `y_ic` is the one-hot indicator. The loss is `1 - mean_c DSC^c`.
 
-    The `(1 - p)^alpha` term down-weights easy positives so the gradient
-    focuses on hard examples; small alpha (e.g. 0.01) yields a near-vanilla
-    dice while still pushing the optimizer away from the trivial all-O
-    solution that dominates token-classification CE on FiNER.
+    The `(1 - p)^alpha` factor is the whole point: it down-weights easy
+    positives so the gradient focuses on the hard examples that dominate
+    the remaining error. The paper's NER experiments on OntoNotes 5.0
+    sweep alpha in {0, 0.6, 1.0, 2.0, 3.0} and report best F1 around
+    alpha=0.6. Setting alpha very close to 0 disables the self-adjusting
+    factor; the loss collapses to plain soft-dice on a softmax with the
+    O majority, the gradient norm shrinks toward zero, and the model
+    settles on predicting O everywhere.
+
+    The `outside_label_id` knob excludes the O (or whatever majority/
+    background) class from the dice mean, which is the standard NER
+    practice. This keeps the dice signal focused on the entity classes
+    that actually carry the F1 we care about.
 
     Positions with label `-100` (HuggingFace's sentinel for special tokens
     and continuation subwords) are masked out before the dice computation,
@@ -46,8 +55,9 @@ class DiceLoss(nn.Module):
         self,
         num_labels: int,
         smooth: float = 1.0,
-        alpha: float = 0.01,
+        alpha: float = 0.6,
         ignore_index: int = -100,
+        outside_label_id: int | None = 0,
     ) -> None:
         super().__init__()
         if num_labels <= 0:
@@ -56,10 +66,18 @@ class DiceLoss(nn.Module):
             raise ValueError("`smooth` must be > 0 to keep the denominator finite.")
         if alpha < 0:
             raise ValueError("`alpha` must be >= 0.")
+        if outside_label_id is not None and not 0 <= outside_label_id < num_labels:
+            raise ValueError(
+                f"`outside_label_id` must be in [0, {num_labels}) or None; "
+                f"got {outside_label_id}."
+            )
         self.num_labels = int(num_labels)
         self.smooth = float(smooth)
         self.alpha = float(alpha)
         self.ignore_index = int(ignore_index)
+        self.outside_label_id = (
+            int(outside_label_id) if outside_label_id is not None else None
+        )
 
     def forward(
         self,
@@ -111,7 +129,12 @@ class DiceLoss(nn.Module):
         probs = F.softmax(valid_logits.float(), dim=-1)
         one_hot = F.one_hot(valid_labels.long(), num_classes=self.num_labels).float()
 
-        weights = (1.0 - probs).pow(self.alpha)
+        # Clamp to avoid (1 - 1.0)^alpha = 0 when alpha is positive, which
+        # otherwise zeros out the gradient on perfectly-confident easy
+        # positives the moment the model gets one right.
+        eps = 1.0e-6
+        probs_clamped = probs.clamp(min=eps, max=1.0 - eps)
+        weights = (1.0 - probs_clamped).pow(self.alpha)
         weighted = weights * probs
 
         # Per-class numerator/denominator summed over valid positions.
@@ -119,6 +142,19 @@ class DiceLoss(nn.Module):
         denominator = (weighted + one_hot).sum(dim=0) + self.smooth
 
         dice_per_class = numerator / denominator
+
+        # Standard NER practice: drop the `O` (background) class from the
+        # mean so the dice signal stays focused on entity classes. With it
+        # included, the high `O` dice score dilutes the loss and the
+        # gradient on rare classes vanishes, which is why the original
+        # `alpha=0.01` config collapsed to all-O at ~0.007 grad norm.
+        if self.outside_label_id is not None:
+            keep_mask = torch.ones(
+                self.num_labels, dtype=torch.bool, device=dice_per_class.device
+            )
+            keep_mask[self.outside_label_id] = False
+            dice_per_class = dice_per_class[keep_mask]
+
         loss = 1.0 - dice_per_class.mean()
 
         # Cast back to the input dtype so the autocast context (fp16 on CUDA)

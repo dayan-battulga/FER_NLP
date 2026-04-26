@@ -183,7 +183,10 @@ class TrainConfig:
     save_total_limit: int = 2
     loss_type: str = "ce"
     dice_smooth: float = 1.0
-    dice_alpha: float = 0.01
+    dice_alpha: float = 0.6
+    dice_outside_label_id: int | None = 0
+    dice_ce_weight: float = 1.0
+    dice_weight: float = 1.0
 
     def __post_init__(self) -> None:
         # YAML can load numbers and lists in slightly inconsistent ways, so we
@@ -244,6 +247,16 @@ class TrainConfig:
             raise ValueError("`dice_smooth` must be > 0.")
         if self.dice_alpha < 0:
             raise ValueError("`dice_alpha` must be >= 0.")
+        if self.dice_outside_label_id is not None:
+            self.dice_outside_label_id = int(self.dice_outside_label_id)
+        self.dice_ce_weight = float(self.dice_ce_weight)
+        self.dice_weight = float(self.dice_weight)
+        if self.dice_ce_weight < 0:
+            raise ValueError("`dice_ce_weight` must be >= 0.")
+        if self.dice_weight <= 0:
+            raise ValueError(
+                "`dice_weight` must be > 0; set `loss_type=ce` to disable dice."
+            )
         if self.loss_type == "dice" and self.use_crf:
             raise ValueError(
                 "`loss_type=dice` is incompatible with `use_crf=true`. "
@@ -656,16 +669,35 @@ def log_llrd_learning_rates(model: torch.nn.Module, head_lr: float, decay: float
 
 
 class DiceLossTrainer(Trainer):
-    """HF Trainer that swaps cross-entropy for self-adjusting Dice Loss.
+    """HF Trainer that swaps cross-entropy for `ce_weight * CE + dice_weight * Dice`.
 
     Used only by the vanilla (non-CRF) path when `config.loss_type == "dice"`.
     The Phase 5d plan keeps CRF + Dice out of scope, so this trainer is wired
     only for the vanilla classifier path.
+
+    Pure dice (`ce_weight = 0`) does not work for token classification on
+    FiNER: with the 95% `O` majority and a softmax over 7 classes, the dice
+    gradient is dominated by the smooth term and the optimizer either
+    collapses to predicting `O` everywhere (with AdamW + cosine, what we
+    observed) or over-predicts entity tokens at random positions. Li et al.
+    2020 Section 4.4 explicitly recommends combining dice with cross-entropy
+    "with one acting as a regularizer of the other," and that is the
+    default here. The weights are configurable in case the user wants to
+    sweep.
     """
 
-    def __init__(self, *args: Any, dice_loss: torch.nn.Module, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        dice_loss: torch.nn.Module,
+        ce_weight: float = 1.0,
+        dice_weight: float = 1.0,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._dice_loss = dice_loss
+        self._ce_weight = float(ce_weight)
+        self._dice_weight = float(dice_weight)
 
     def compute_loss(
         self,
@@ -677,7 +709,16 @@ class DiceLossTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
-        loss = self._dice_loss(logits, labels)
+
+        loss = self._dice_weight * self._dice_loss(logits, labels)
+        if self._ce_weight > 0:
+            ce = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                labels.reshape(-1),
+                ignore_index=-100,
+            )
+            loss = loss + self._ce_weight * ce
+
         # Restore labels so other callbacks (e.g. predict) still see them.
         inputs["labels"] = labels
         return (loss, outputs) if return_outputs else loss
@@ -772,6 +813,7 @@ def create_trainer(
             num_labels=NUM_LABELS,
             smooth=config.dice_smooth,
             alpha=config.dice_alpha,
+            outside_label_id=config.dice_outside_label_id,
         )
         return DiceLossTrainer(
             model=model,
@@ -788,6 +830,8 @@ def create_trainer(
                 )
             ],
             dice_loss=dice_loss,
+            ce_weight=config.dice_ce_weight,
+            dice_weight=config.dice_weight,
             **trainer_kwargs,
         )
 
