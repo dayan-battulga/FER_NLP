@@ -261,16 +261,20 @@ def _stream_fnspid(
         n_seen += 1
 
         if body_field is None:
+            # Detect the body column by NAME (not value type). Some FNSPID rows
+            # have a None body even though the column exists; checking the value
+            # of the very first row would falsely abort. The per-row
+            # `isinstance(body, str)` check below handles None / non-string rows
+            # by counting them as `num_dropped_too_short`.
             for candidate in FNSPID_BODY_FIELD_CANDIDATES:
-                value = row.get(candidate)
-                if isinstance(value, str):
+                if candidate in row:
                     body_field = candidate
                     break
             if body_field is None:
                 raise RuntimeError(
                     "FNSPID rows do not expose any of "
-                    f"{list(FNSPID_BODY_FIELD_CANDIDATES)} as a string body field. "
-                    f"Available keys: {sorted(row.keys())}"
+                    f"{list(FNSPID_BODY_FIELD_CANDIDATES)} as a column. "
+                    f"Available columns: {sorted(row.keys())}"
                 )
             for candidate in FNSPID_URL_FIELD_CANDIDATES:
                 if candidate in row:
