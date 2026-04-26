@@ -181,6 +181,9 @@ class TrainConfig:
     distillation_temperature: float | None = None
     distillation_alpha: float | None = None
     save_total_limit: int = 2
+    loss_type: str = "ce"
+    dice_smooth: float = 1.0
+    dice_alpha: float = 0.01
 
     def __post_init__(self) -> None:
         # YAML can load numbers and lists in slightly inconsistent ways, so we
@@ -232,6 +235,26 @@ class TrainConfig:
             raise ValueError("`head_lr` must be > 0.")
         if self.save_total_limit <= 0:
             raise ValueError("`save_total_limit` must be > 0.")
+        self.loss_type = str(self.loss_type).lower()
+        if self.loss_type not in {"ce", "dice"}:
+            raise ValueError("`loss_type` must be `ce` or `dice`.")
+        self.dice_smooth = float(self.dice_smooth)
+        self.dice_alpha = float(self.dice_alpha)
+        if self.dice_smooth <= 0:
+            raise ValueError("`dice_smooth` must be > 0.")
+        if self.dice_alpha < 0:
+            raise ValueError("`dice_alpha` must be >= 0.")
+        if self.loss_type == "dice" and self.use_crf:
+            raise ValueError(
+                "`loss_type=dice` is incompatible with `use_crf=true`. "
+                "CRF NLL and Dice do not compose cleanly; the Phase 5d "
+                "spike is restricted to the vanilla path."
+            )
+        if self.loss_type == "dice" and self.label_smoothing_factor > 0:
+            raise ValueError(
+                "`loss_type=dice` is incompatible with `label_smoothing_factor > 0`. "
+                "Dice already self-adjusts; mixing the two confuses the gradient."
+            )
 
 
 # -----------------------------------------------------------------------------
@@ -628,6 +651,39 @@ def log_llrd_learning_rates(model: torch.nn.Module, head_lr: float, decay: float
 
 
 # -----------------------------------------------------------------------------
+# Custom Trainer for the Dice Loss spike (Phase 5d)
+# -----------------------------------------------------------------------------
+
+
+class DiceLossTrainer(Trainer):
+    """HF Trainer that swaps cross-entropy for self-adjusting Dice Loss.
+
+    Used only by the vanilla (non-CRF) path when `config.loss_type == "dice"`.
+    The Phase 5d plan keeps CRF + Dice out of scope, so this trainer is wired
+    only for the vanilla classifier path.
+    """
+
+    def __init__(self, *args: Any, dice_loss: torch.nn.Module, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._dice_loss = dice_loss
+
+    def compute_loss(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, torch.Tensor],
+        return_outputs: bool = False,
+        num_items_in_batch: int | None = None,
+    ):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        loss = self._dice_loss(logits, labels)
+        # Restore labels so other callbacks (e.g. predict) still see them.
+        inputs["labels"] = labels
+        return (loss, outputs) if return_outputs else loss
+
+
+# -----------------------------------------------------------------------------
 # Trainer construction
 # -----------------------------------------------------------------------------
 
@@ -708,6 +764,32 @@ def create_trainer(
         )
         optimizer = torch.optim.AdamW(llrd_param_groups)
         trainer_kwargs["optimizers"] = (optimizer, None)
+
+    if config.loss_type == "dice":
+        from src.losses import DiceLoss
+
+        dice_loss = DiceLoss(
+            num_labels=NUM_LABELS,
+            smooth=config.dice_smooth,
+            alpha=config.dice_alpha,
+        )
+        return DiceLossTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=dataset["train"],
+            eval_dataset=dataset["validation"],
+            tokenizer=tokenizer,
+            data_collator=DataCollatorForTokenClassification(tokenizer=tokenizer),
+            compute_metrics=compute_metrics,
+            callbacks=[
+                EarlyStoppingCallback(
+                    early_stopping_patience=config.early_stopping_patience,
+                    early_stopping_threshold=config.early_stopping_threshold,
+                )
+            ],
+            dice_loss=dice_loss,
+            **trainer_kwargs,
+        )
 
     return Trainer(
         model=model,

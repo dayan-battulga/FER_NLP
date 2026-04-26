@@ -1,0 +1,47 @@
+# Phase 5d: Dice Loss spike on the vanilla path, single seed (88).
+#
+# This is exploratory and does NOT influence the headline. It tests whether
+# self-adjusting Dice Loss (Li et al. 2020) lifts the vanilla 5-epoch path
+# on FiNER. The production path uses CRF; CRF + Dice does not compose
+# cleanly and is explicitly out of scope. Phase 5d stays on the vanilla
+# path only.
+#
+# Acceptance gate (revised in the Phase 5 plan): test entity F1 on seed 88
+# must lift by >= +0.005 over `efficient_training_seed88` (~0.8467) before
+# Dice gets documented as a follow-up direction in REPORT.md. The +0.003
+# threshold from earlier planning is too loose given seed-to-seed variance
+# and the fact that any positive vanilla result would still need to survive
+# a CRF integration that may eat the lift.
+#
+# If the spike clears +0.005: document as a follow-up direction only; do
+# NOT escalate to 3 seeds inside Phase 5 (would compete with Phase C time).
+# If the spike does not clear +0.005: drop and document the negative result.
+#
+# Wall-clock: ~7 min single-seed run on A100, parallelizable with Phase 5a.
+
+model_name: roberta-large
+seeds: [88]
+learning_rate: 3.0e-5
+batch_size: 8
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+
+# Vanilla path; CRF + Dice is intentionally out of scope (TrainConfig raises
+# if both are set together).
+use_crf: false
+
+# Phase 5d additions.
+loss_type: dice
+dice_smooth: 1.0
+dice_alpha: 0.01
+
+wandb_project: finer-ord
+wandb_tags: [phase-5, dice-loss, exploratory, vanilla, 5-epoch, single-seed]
+output_dir: ./results
