@@ -127,6 +127,7 @@ def load_model_and_tokenizer(
                 f"Missing FP32 source checkpoint for INT8 measurement: {fp32_checkpoint}"
             )
         fp32_model = AutoModelForTokenClassification.from_pretrained(fp32_checkpoint)
+        torch.backends.quantized.engine = 'qnnpack'
         model = torch.quantization.quantize_dynamic(
             fp32_model.cpu(),
             {nn.Linear},

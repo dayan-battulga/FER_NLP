@@ -6,7 +6,7 @@ model_name: distilroberta-base
 seeds: [88, 5768, 78516]
 learning_rate: 5.0e-5
 batch_size: 16
-num_epochs: 5
+num_epochs: 15
 weight_decay: 0.01
 early_stopping_patience: 7
 early_stopping_threshold: 1.0e-3

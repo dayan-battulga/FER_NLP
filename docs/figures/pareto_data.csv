@@ -1,0 +1,6 @@
+name,label,kind,f1,latency_ms_bs1,throughput_bs8,size_mb,latency_frontier,size_frontier
+efficient_after_dapt_seed88,Teacher single (3-seed mean),teacher,0.8548418490843429,106.5688959788531,21.55598752483018,1355.776361465454,True,True
+efficient_after_dapt_logit_ensemble,Teacher logit ensemble,teacher_ensemble,0.8633879781420765,319.7066879365593,,4067.3290843963623,True,True
+student_distilled_seed88,Student FP32 single (3-seed mean),student,0.8277466862583364,21.666729589924216,141.3073344501852,311.03618240356445,True,True
+student_distilled_logit_ensemble,Student FP32 logit ensemble,student_ensemble,0.8303797468354429,65.00018876977265,,933.1085472106934,True,True
+student_distilled_seed88_int8,Student INT8 single (3-seed mean),student_int8,0.8241320834440037,10.752561734989285,83.11332131444922,189.57618522644043,True,True

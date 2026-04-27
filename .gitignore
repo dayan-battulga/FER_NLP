@@ -1,0 +1,44 @@
+# Results — keep the master CSV, ignore everything heavy (checkpoints, predictions, per-run dirs)
+results/*
+!results/results.csv
+!results/results_detailed.csv
+results/*/checkpoint-*/
+results/dapt_roberta-large/
+*.bin
+*.safetensors
+*_emissions.npz
+*_logits.npz
+crf_transitions.npz
+
+# W&B local cache
+/wandb
+
+# HuggingFace caches (if redirected into the repo)
+.cache/
+hf_cache/
+
+# Local agent context
+CLAUDE.md
+
+# Documentation artifacts used by README
+/docs/*
+!/docs/PROJECT_CONTEXT.MD
+!/docs/figures/
+!/docs/figures/pareto.png
+!/docs/figures/pareto_data.csv
+
+# venv
+.venv/
+.git/
+
+# Wandb API_key
+secret.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

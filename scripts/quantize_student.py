@@ -138,12 +138,26 @@ def quantize_one_run(run_dir: Path, batch_size: int) -> Path:
 
     model = AutoModelForTokenClassification.from_pretrained(checkpoint_dir)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, add_prefix_space=True)
+    torch.backends.quantized.engine = 'qnnpack'
     quantized_model = torch.quantization.quantize_dynamic(
         model.cpu(),
         {nn.Linear},
         dtype=torch.qint8,
     )
-    quantized_model.save_pretrained(output_dir, safe_serialization=False)
+    import shutil
+    torch.save(quantized_model.state_dict(), output_dir / "pytorch_model.bin")
+    for fname in [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.json",
+        "merges.txt",
+    ]:
+        src = checkpoint_dir / fname
+        if src.exists():
+            shutil.copy(src, output_dir / fname)
+    tokenizer.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
     model_name = str(checkpoint_dir)

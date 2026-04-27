@@ -1,87 +1,187 @@
 # FiNER-ORD Financial NER
 
-Financial named entity recognition on the `gtfintechlab/finer-ord` dataset.
-The task is BIO token classification over 7 labels:
+This is my financial named entity recognition project for the [`gtfintechlab/finer-ord`](https://huggingface.co/datasets/gtfintechlab/finer-ord) dataset. The goal is to tag financial text with BIO labels for people, locations, and organizations:
 
 - `O`
 - `B-PER`, `I-PER`
 - `B-LOC`, `I-LOC`
 - `B-ORG`, `I-ORG`
 
-The headline metric is strict entity-level F1 from `seqeval`. Token weighted
-F1 is useful context, but it is not the primary optimization target.
+The main metric is strict entity-level F1 from `seqeval`. I focused on that instead of token-level F1 because the dataset has a lot of `O` tokens, so token metrics can look better than the actual entity extraction quality.
 
-## Project Direction
+The bigger idea for the project was: can I get a strong NER model, then make a smaller/faster version that is still pretty close in accuracy? So I ended up with a teacher model, a distilled student model, and an INT8 quantized student model.
 
-This repo is framed around the take-home brief's "F1 or efficiency wins"
-criterion. The current teacher is locked, and the active work is Phase C:
-distillation, dynamic INT8 quantization, latency measurement, and a Pareto
-frontier chart.
+![Pareto frontier for FiNER-ORD teacher, student, and INT8 student](docs/figures/pareto.png)
 
-The locked teacher is:
+## Quick Results
 
-- `efficient_after_dapt_logit_ensemble`
-- RoBERTa-large with FiNER-only DAPT
-- CRF fine-tuning
-- 3-seed logit / emission ensemble
-- Test entity F1: `0.8634`
+| Model | Test Entity F1 | Median Latency, bs=1 | Disk Size | What it is |
+|---|---:|---:|---:|---|
+| Teacher single, 3-seed mean | `0.8548` | `106.6 ms` | `1356 MB` | Best single teacher setup |
+| Teacher logit ensemble | `0.8634` | `319.7 ms` | `4067 MB` | Best F1 overall |
+| Student FP32 single, 3-seed mean | `0.8277` | `21.7 ms` | `311 MB` | Smaller deployable model |
+| Student FP32 logit ensemble | `0.8304` | `65.0 ms` | `933 MB` | Best student F1 |
+| Student INT8 single, 3-seed mean | `0.8241` | `10.8 ms` | `190 MB` | Fastest CPU model |
 
-Do not retrain or modify the locked teacher path unless the project direction
-changes. Phase C reads existing teacher artifacts and builds a deployable
-student story around them.
+Main takeaways:
+
+- The best teacher ensemble got `0.8634` strict entity F1.
+- The distilled student ensemble got `0.8304` F1, which is about `96.2%` of the teacher ensemble's F1.
+- The FP32 student single model is `4.9x` faster than the teacher single model at batch size 1 on my Apple M2 Pro CPU.
+- The INT8 student is `9.9x` faster than the teacher single model and `2.0x` faster than the FP32 student at batch size 1.
+- INT8 only dropped the student mean F1 by `0.0036`, which was comfortably inside my `0.01` tolerance.
+
+The numbers in the chart come from `docs/figures/pareto_data.csv`, which is generated from local latency JSON artifacts. Latency was measured on an Apple M2 Pro CPU with `torch==2.3.1`, so the exact times will differ on other machines.
+
+## What I Was Trying To Do
+
+The project prompt was basically about winning on F1 or efficiency. I tried to do both:
+
+1. Build a strong RoBERTa-large teacher.
+2. Distill it into a smaller DistilRoBERTa student.
+3. Quantize the student with dynamic INT8 for CPU inference.
+4. Plot the F1/latency/size tradeoff so the result is easy to compare.
+
+The final story is pretty simple: the teacher is the most accurate, the student is much faster and smaller, and the INT8 student is the best single-example CPU option if you can accept a tiny F1 drop.
 
 ## Dataset
 
-Source: `gtfintechlab/finer-ord` on Hugging Face.
+FiNER-ORD is a financial NER dataset with train/validation/test splits:
 
-Splits:
+| Split | Articles | Sentences | Tokens | PER | LOC | ORG |
+|---|---:|---:|---:|---:|---:|---:|
+| Train | 135 | 3,262 | 80,531 | 821 | 966 | 2,026 |
+| Validation | 24 | 402 | 10,233 | 138 | 193 | 274 |
+| Test | 42 | 1,075 | 25,957 | 284 | 300 | 544 |
 
-- Train: 135 articles, 3,262 sentences, 80,531 tokens
-- Validation: 24 articles, 402 sentences, 10,233 tokens
-- Test: 42 articles, 1,075 sentences, 25,957 tokens
+The label mapping is in `src/data.py`, and I kept the dataset's original integer ordering.
 
-Entity counts:
+## What I Built
 
-- Train: PER 821, LOC 966, ORG 2026
-- Validation: PER 138, LOC 193, ORG 274
-- Test: PER 284, LOC 300, ORG 544
+### Teacher Model
 
-The label mapping lives in `src/data.py` and preserves the dataset's integer
-ordering. Run this before any long experiment if the environment is new:
+The teacher is based on `roberta-large`. I first did domain-adaptive pretraining on the FiNER train articles, then fine-tuned a CRF token classifier. I trained three seeds and ensembled them by averaging CRF emissions before decoding.
 
-```bash
-python -m src.data
+Teacher-side pieces:
+
+- `src/dapt.py`: FiNER-only masked language model pretraining
+- `src/crf_model.py`: RoBERTa-large + CRF token classifier
+- `src/evaluate.py`: strict entity F1, token F1, and per-class metrics
+- `scripts/ensemble_logits.py`: vote/logit/emission ensembling
+
+Best teacher results:
+
+| Recipe | Test Entity F1 |
+|---|---:|
+| Vanilla RoBERTa-large, 3-seed mean | `0.8485 +/- 0.0022` |
+| RoBERTa-large + CRF, 3-seed mean | `0.8521 +/- 0.0018` |
+| Efficient RoBERTa-large + CRF, 3-seed mean | `0.8481 +/- 0.0066` |
+| Efficient after FiNER DAPT, 3-seed mean | `0.8548 +/- 0.0038` |
+| Efficient after FiNER DAPT, logit ensemble | `0.8634` |
+
+I also tried a few things that did not win, including DeBERTa-v3-large, layer-wise learning rate decay, layer-wise attention scaling, and BIO repair. The RoBERTa-large + DAPT + CRF path stayed best.
+
+### Student Model
+
+The student is `distilroberta-base` with a normal token classification head. I intentionally did not use a CRF for the student because I wanted the inference path to stay simple and fast.
+
+The student is trained with offline distillation. That means I saved teacher emissions once, then trained the student against those saved logits instead of running the teacher during every student training step.
+
+Distillation loss:
+
+```text
+L_hard = CrossEntropy(student_logits, gold_labels)
+L_soft = T^2 * KLDiv(
+    log_softmax(student_logits / T),
+    softmax(teacher_emissions / T)
+)
+L_total = alpha * L_hard + (1 - alpha) * L_soft
 ```
 
-The sanity output should show `Obama` as `B-PER` and continuous multi-token
-entities.
+Student setup:
 
-## Repository Layout
+- `T = 2.0`
+- `alpha = 0.5`
+- Teacher signal from the 3-seed teacher ensemble
+- Seeds: `88`, `5768`, `78516`
+- Early stopping / best-checkpoint loading
 
-Core modules:
+The teacher and student both use the RoBERTa BPE family, so the saved emissions line up cleanly with the student's tokenization when using first-subword-only labels.
 
-- `src/data.py`: dataset loading, grouping, tokenization, label alignment
-- `src/evaluate.py`: strict entity F1, token F1, confusion matrices
-- `src/train.py`: vanilla training, config loading, mode dispatch
-- `src/crf_model.py`: locked CRF teacher training and emission saving
-- `src/dapt.py`: FiNER-only masked language model continued pretraining
-- `src/distill.py`: offline student distillation from teacher emissions
-- `src/losses.py`: Dice loss used for an exploratory negative result
+### INT8 Quantization
 
-Phase C scripts:
+For the fastest model, I used PyTorch dynamic quantization on the student's `nn.Linear` layers:
 
-- `scripts/extract_train_emissions.py`
-- `scripts/measure_latency.py`
-- `scripts/quantize_student.py`
-- `scripts/build_pareto.py`
-- `scripts/ensemble_logits.py`
+```python
+torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+```
 
-Documentation:
+This is CPU-focused and does not need calibration data. On Apple Silicon, I had to use the `qnnpack` quantization backend because the default `fbgemm` backend is for x86.
 
-- `CLAUDE.md`: current operational context
-- `docs/PROJECT_CONTEXT.MD`: detailed technical reference
-- `docs/figures/`: Pareto chart outputs
-- `REPORT.md`: deferred until real Phase C numbers exist
+INT8 results:
+
+- FP32 student mean F1: `0.8277`
+- INT8 student mean F1: `0.8241`
+- Mean F1 drop: `0.0036`
+- Size: `190 MB` instead of `311 MB`
+- Batch-size-1 latency: `10.8 ms` instead of `21.7 ms`
+
+One interesting thing: INT8 was worse than FP32 at batch size 8 on my M2 Pro (`96.3 ms` vs `56.6 ms`). So I would use INT8 for interactive/single-example CPU inference, but FP32 student for batched throughput on this hardware.
+
+## Stack
+
+Core ML stack:
+
+- Python
+- PyTorch `2.3.1`
+- Hugging Face `transformers` `4.44.2`
+- Hugging Face `datasets` `2.21.0`
+- `pytorch-crf`
+- `seqeval`
+- scikit-learn
+
+Experiment / analysis tools:
+
+- YAML configs
+- Weights & Biases support
+- pandas / NumPy
+- matplotlib
+- Jupyter notebooks
+
+Hardware for the reported latency numbers:
+
+- Apple M2 Pro CPU
+- CPU inference only for the Pareto chart
+- Dynamic INT8 with `qnnpack`
+
+## Repo Layout
+
+```text
+.
+├── configs/                  # YAML experiment configs
+│   └── baseline/
+├── docs/
+│   ├── PROJECT_CONTEXT.MD    # Longer technical notes
+│   └── figures/
+│       ├── pareto.png
+│       └── pareto_data.csv
+├── notebooks/                # Analysis notebooks
+├── results/                  # Run summaries, predictions, latency outputs
+├── scripts/
+│   ├── build_pareto.py       # Builds the Pareto chart
+│   ├── ensemble_logits.py    # Ensembles seed runs
+│   ├── extract_train_emissions.py
+│   ├── measure_latency.py
+│   └── quantize_student.py
+└── src/
+    ├── data.py               # Dataset loading and label alignment
+    ├── evaluate.py           # Metrics
+    ├── train.py              # Training entry point
+    ├── crf_model.py          # CRF teacher
+    ├── dapt.py               # Domain-adaptive pretraining
+    ├── distill.py            # Student distillation
+    └── losses.py
+```
 
 ## Setup
 
@@ -91,236 +191,80 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Optional W&B logging is configured through the YAML files. Add `--no-wandb`
-to training commands when logging is not desired.
-
-The pinned versions are in `requirements.txt`. Do not upgrade the ML stack
-casually because saved checkpoints and tokenizer behavior are part of the
-experiment contract.
-
-## Current Results
-
-The source of truth for completed runs is:
-
-- `results/results.csv`
-- `results/results_detailed.csv`
-- per-run `results/<run_id>/summary.json`
-
-Do not invent metrics in documentation. Pull F1 values from the CSV or summary
-files, and pull latency values from `results/latency/*.json` after measurements
-have been run.
-
-Known locked teacher values:
-
-- Best single-model family: `efficient_after_dapt`
-- 3-seed mean test entity F1: `0.8548 +/- 0.0038`
-- Locked teacher ensemble: `efficient_after_dapt_logit_ensemble`
-- Ensemble test entity F1: `0.8634`
-
-## Command Flow
-
-### 1. Verify data and smoke test
+`matplotlib` is only needed if you want to regenerate the Pareto figure:
 
 ```bash
-python -m src.data
-python -m src.train --config configs/smoke_test.yaml --run-checks
+pip install matplotlib==3.9.2
 ```
 
-### 2. Historical baselines
-
-These are complete and do not need to be rerun for Phase C:
+I usually run commands with the project venv directly:
 
 ```bash
-python -m src.train --config configs/baseline_teacher.yaml
-python -m src.train --config configs/baseline/teacher_crf.yaml
-python -m src.train --config configs/baseline/efficient_training.yaml
+./.venv/bin/python -m src.data
 ```
 
-### 3. Locked DAPT teacher path
+W&B logging is optional. Distillation supports `--no-wandb`; DAPT reads W&B settings from the YAML config and continues without W&B if it is unavailable.
 
-This path is complete. Do not retrain it during Phase C:
+## Reproducing The Main Artifacts
+
+Check that the dataset and labels load correctly:
 
 ```bash
-python -m src.dapt --config configs/baseline/dapt_roberta_large.yaml
-python -m src.train --config configs/baseline/efficient_after_dapt.yaml
+./.venv/bin/python -m src.data
 ```
 
-The fine-tuned teacher runs are:
-
-- `results/efficient_after_dapt_seed88`
-- `results/efficient_after_dapt_seed5768`
-- `results/efficient_after_dapt_seed78516`
-
-### 4. Locked teacher ensemble
-
-The headline teacher is the CRF logit / emission ensemble:
+Run the teacher path:
 
 ```bash
-python scripts/ensemble_logits.py \
+./.venv/bin/python -m src.dapt --config configs/baseline/dapt_roberta_large.yaml
+./.venv/bin/python -m src.train --config configs/baseline/efficient_after_dapt.yaml
+```
+
+Build the teacher ensemble:
+
+```bash
+./.venv/bin/python scripts/ensemble_logits.py \
   --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516 \
   --mode logit \
   --use-crf \
   --output-name efficient_after_dapt_logit_ensemble
 ```
 
-### 5. Extract train emissions for distillation
-
-Student distillation is offline. Extract train emissions once and reuse them:
+Extract teacher emissions and train the student:
 
 ```bash
-python scripts/extract_train_emissions.py \
+./.venv/bin/python scripts/extract_train_emissions.py \
   --runs efficient_after_dapt_seed88 efficient_after_dapt_seed5768 efficient_after_dapt_seed78516
+
+./.venv/bin/python -m src.distill \
+  --config configs/baseline/student_distilled.yaml \
+  --no-wandb
 ```
 
-Each run receives:
-
-```text
-results/<run_id>/train_emissions.npz
-```
-
-The file schema matches the existing validation and test emission dumps:
-
-- `emissions`
-- `attention_mask`
-- `labels`
-
-### 6. Distill the student
-
-The student config is `configs/baseline/student_distilled.yaml`.
-
-Smoke check:
+Quantize the student and measure latency:
 
 ```bash
-python -m src.distill --config configs/baseline/student_distilled.yaml --smoke --no-wandb
-```
-
-Full 3-seed run:
-
-```bash
-python -m src.distill --config configs/baseline/student_distilled.yaml --no-wandb
-```
-
-Expected run directories:
-
-- `results/student_distilled_seed88`
-- `results/student_distilled_seed5768`
-- `results/student_distilled_seed78516`
-
-The student is `distilroberta-base`, uses first-subword-only alignment, and
-does not use a CRF.
-
-### 7. Ensemble the student
-
-Student ensembling uses vanilla logits, not CRF emissions:
-
-```bash
-python scripts/ensemble_logits.py \
-  --runs student_distilled_seed88 student_distilled_seed5768 student_distilled_seed78516 \
-  --mode logit \
-  --output-name student_distilled_logit_ensemble
-```
-
-### 8. Measure latency
-
-Latency measurements write JSON files under `results/latency/`.
-
-GPU FP32 examples:
-
-```bash
-python scripts/measure_latency.py \
-  --runs efficient_after_dapt_seed88 student_distilled_seed88 \
-  --device cuda
-```
-
-CPU FP32 examples:
-
-```bash
-python scripts/measure_latency.py \
-  --runs efficient_after_dapt_seed88 student_distilled_seed88 \
-  --device cpu
-```
-
-The script reports:
-
-- torch version
-- CPU model
-- GPU model when available
-- parameter count
-- checkpoint size
-- median latency at batch sizes 1 and 8
-- p95 latency at batch sizes 1 and 8
-- throughput for batch size 8
-
-### 9. Quantize the student
-
-Dynamic INT8 quantization is CPU-targeted and uses `nn.Linear` modules only:
-
-```bash
-python scripts/quantize_student.py \
+./.venv/bin/python scripts/quantize_student.py \
   --runs student_distilled_seed88 student_distilled_seed5768 student_distilled_seed78516
-```
 
-Each student run receives:
-
-```text
-results/<student_run>/checkpoint-best-int8/
-results/<student_run>/summary_int8.json
-```
-
-Measure INT8 latency separately on CPU:
-
-```bash
-python scripts/measure_latency.py \
-  --runs student_distilled_seed88_int8 \
+./.venv/bin/python scripts/measure_latency.py \
+  --runs efficient_after_dapt_seed88 student_distilled_seed88 student_distilled_seed88_int8 \
   --device cpu
 ```
 
-### 10. Build the Pareto chart
-
-Once F1, latency, and INT8 summaries exist:
+Regenerate the Pareto chart:
 
 ```bash
-python scripts/build_pareto.py
+./.venv/bin/python scripts/build_pareto.py
 ```
 
-Outputs:
+This writes:
 
 - `docs/figures/pareto.png`
 - `docs/figures/pareto_data.csv`
 
-The chart uses test entity F1 on the y-axis. The latency subplot uses median
-single-example latency at batch size 1. The size subplot uses checkpoint size
-in MB. The backing CSV includes throughput values where available.
+## Notes
 
-## Phase C Acceptance Targets
+The final teacher, student, and INT8 student are locked. For headline single-model F1, I use 3-seed means. For latency, I use seed 88 because speed mostly depends on the model architecture, not the random seed.
 
-Targets are goals, not assumed results:
-
-- Distilled student single-model mean at or above `0.82` test entity F1
-- Distilled student logit ensemble at or above `0.83` test entity F1
-- INT8 student within `0.01` F1 of the FP32 student
-- Student points down and left of the teacher on the Pareto chart
-
-Use 3-seed mean plus standard deviation for headline single-model claims.
-Never headline a single lucky seed.
-
-## Important Constraints
-
-- Do not modify `src/crf_model.py`, `src/dapt.py`, `src/data.py`, or `src/evaluate.py` for Phase C.
-- Do not modify `configs/baseline/efficient_after_dapt.yaml`.
-- Do not modify `configs/baseline/dapt_roberta_large.yaml`.
-- Do not retrain the locked teacher checkpoints.
-- Do not delete existing artifacts under `results/`.
-- Do not add new dependencies silently.
-- Keep `REPORT.md` deferred until real Phase C numbers exist.
-
-## Optional Teacher-Side Experiments
-
-These are not on the critical path:
-
-- Packed 512-token re-inference via `scripts/reinfer_packed.py`
-- 6-model multi-recipe ensemble if old CRF emissions are re-extracted
-- Single-seed Dice loss spike via `configs/baseline/efficient_dice_seed88.yaml`
-
-Run validation before test for packed re-inference. Do not let optional teacher
-experiments block Phase C.
+The main tradeoff is that INT8 is the fastest for single-example CPU inference, while the FP32 student is better for batched throughput on my Apple Silicon setup.
