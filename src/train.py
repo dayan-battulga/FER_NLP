@@ -175,6 +175,11 @@ class TrainConfig:
     wandb_tags: list[str] | None = None
     output_dir: str = "./results"
     use_crf: bool = False
+    use_distillation: bool = False
+    teacher_mode: str = "ensemble"
+    teacher_runs: list[str] | None = None
+    distill_temperature: float = 2.0
+    distill_alpha: float = 0.5
     crf_learning_rate: float | None = None
     save_total_limit: int = 2
     loss_type: str = "ce"
@@ -204,6 +209,14 @@ class TrainConfig:
         self.head_lr = float(self.head_lr) if self.head_lr is not None else None
         self.save_total_limit = int(self.save_total_limit)
         self.use_crf = bool(self.use_crf)
+        self.use_distillation = bool(self.use_distillation)
+        self.teacher_mode = str(self.teacher_mode).lower()
+        if self.teacher_runs is None:
+            self.teacher_runs = []
+        else:
+            self.teacher_runs = [str(run) for run in self.teacher_runs]
+        self.distill_temperature = float(self.distill_temperature)
+        self.distill_alpha = float(self.distill_alpha)
 
         # Treat missing tags as an empty list so later logging code does not
         # need to branch on None vs [].
@@ -233,6 +246,21 @@ class TrainConfig:
             raise ValueError("`head_lr` must be > 0.")
         if self.save_total_limit <= 0:
             raise ValueError("`save_total_limit` must be > 0.")
+        if self.use_distillation and self.use_crf:
+            raise ValueError(
+                "`use_distillation=true` is incompatible with `use_crf=true`; "
+                "the distilled student uses a vanilla token classification head."
+            )
+        if self.teacher_mode not in {"ensemble", "single"}:
+            raise ValueError("`teacher_mode` must be `ensemble` or `single`.")
+        if self.use_distillation and not self.teacher_runs:
+            raise ValueError("`teacher_runs` must be provided when `use_distillation=true`.")
+        if self.teacher_mode == "single" and len(self.teacher_runs) != 1:
+            raise ValueError("`teacher_mode=single` requires exactly one `teacher_runs` entry.")
+        if self.distill_temperature <= 0:
+            raise ValueError("`distill_temperature` must be > 0.")
+        if not 0.0 <= self.distill_alpha <= 1.0:
+            raise ValueError("`distill_alpha` must be in [0, 1].")
         self.loss_type = str(self.loss_type).lower()
         if self.loss_type not in {"ce", "dice"}:
             raise ValueError("`loss_type` must be `ce` or `dice`.")
@@ -1142,7 +1170,17 @@ def run_training(
 ) -> None:
     """Run the full experiment across every seed in the config."""
 
-    # Keep future experiment modes explicit instead of silently ignoring them.
+    if config.use_distillation:
+        from src.distill import run_distillation
+
+        run_distillation(
+            config=config,
+            config_path=config_path,
+            run_checks=run_checks,
+            disable_wandb=disable_wandb,
+        )
+        return
+
     if config.use_crf:
         from src.crf_model import run_crf_training
 

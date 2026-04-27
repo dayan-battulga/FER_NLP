@@ -34,16 +34,16 @@ Usage:
 
     # Validation pass first (safe, burns the val signal not the test signal)
     python scripts/reinfer_packed.py \
-        --runs efficient_after_dapt_v2_seed88 \
-               efficient_after_dapt_v2_seed5768 \
-               efficient_after_dapt_v2_seed78516 \
+        --runs efficient_after_dapt_seed88 \
+               efficient_after_dapt_seed5768 \
+               efficient_after_dapt_seed78516 \
         --mode crf --split val
 
     # Test pass only if validation delta is non-negative
     python scripts/reinfer_packed.py \
-        --runs efficient_after_dapt_v2_seed88 \
-               efficient_after_dapt_v2_seed5768 \
-               efficient_after_dapt_v2_seed78516 \
+        --runs efficient_after_dapt_seed88 \
+               efficient_after_dapt_seed5768 \
+               efficient_after_dapt_seed78516 \
         --mode crf --split test
 """
 

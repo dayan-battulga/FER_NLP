@@ -1,0 +1,32 @@
+# Phase C: DistilRoBERTa student trained from locked teacher emissions.
+# The teacher runs must already contain train_emissions.npz extracted by
+# scripts/extract_train_emissions.py.
+
+model_name: distilroberta-base
+seeds: [88, 5768, 78516]
+learning_rate: 5.0e-5
+batch_size: 16
+num_epochs: 5
+weight_decay: 0.01
+early_stopping_patience: 7
+early_stopping_threshold: 1.0e-3
+max_seq_length: 256
+fp16: true
+warmup_ratio: 0.1
+lr_scheduler_type: cosine
+label_smoothing_factor: 0.0
+label_all_subwords: false
+
+use_distillation: true
+use_crf: false
+teacher_mode: ensemble
+teacher_runs:
+  - efficient_after_dapt_seed88
+  - efficient_after_dapt_seed5768
+  - efficient_after_dapt_seed78516
+distill_temperature: 2.0
+distill_alpha: 0.5
+
+wandb_project: finer-ord
+wandb_tags: [phase-c, student, distillation, distilroberta-base]
+output_dir: ./results
